@@ -123,7 +123,7 @@
   <div class="timeline">
     <div class="modes">
       <div class="mode active" id="mPast" onclick="setMode('past')">🔥 Feu réel (5 j passés)</div>
-      <div class="mode" id="mSim" onclick="setMode('sim')">🧪 Simulation (48 h)</div>
+      <div class="mode" id="mSim" onclick="setMode('sim')">🧪 Simulation (7 j)</div>
     </div>
     <div class="tl-row">
       <button class="play" id="play" onclick="togglePlay()">▶</button>
@@ -154,6 +154,8 @@ let state={mode:'past', past:null, sim:null, data:null, idx:0, playing:false, ti
 const $=id=>document.getElementById(id);
 const fmtT=iso=>{ if(!iso) return '—'; const d=new Date(iso.replace(' ','T'));
   return d.toLocaleString('fr-FR',{weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}); };
+const ago=iso=>{ if(!iso) return ''; const m=Math.round((Date.now()-new Date(iso.replace(' ','T')))/60000);
+  if(m<60) return 'il y a '+m+' min'; const h=Math.round(m/60); return h<48?'il y a '+h+' h':'il y a '+Math.round(h/24)+' j'; };
 
 async function getJSON(url, tries=20){
   for(let i=0;i<tries;i++){
@@ -193,12 +195,15 @@ function renderStats(){
   let ss=0,cc=0; wind.forEach(w=>{const r=(w.wind_direction_10m_deg||0)*Math.PI/180; ss+=Math.sin(r); cc+=Math.cos(r);});
   const avgD=(Math.atan2(ss,cc)*180/Math.PI+360)%360;
   const away=fp.distance_to_bordeaux_km>20;
+  const lastDet=d.firms&&d.firms.last_detection;
+  const sats=(d.firms&&d.firms.satellites||[]).join(', ');
   $('stats').innerHTML=`
     <div class="stat fire"><div class="l">🔥 Distance du feu</div><div class="v">${fp.distance_to_bordeaux_km.toFixed(1)} km</div></div>
     <div class="stat"><div class="l">🔴 Foyers actifs (5 j)</div><div class="v">${fp.n_hotspots}</div></div>
     <div class="stat"><div class="l">💨 Vent moyen (24 h)</div><div class="v">${avgS.toFixed(1)} m/s ${dirLabel(avgD)}</div></div>
-    <div class="stat ${away?'ok':'warn'}"><div class="l">⚠️ Risque Bordeaux</div><div class="v">${away?'Faible':'À surveiller'}</div></div>`;
-  $('src').innerHTML=`Sources : ${state.past.source||'NASA FIRMS'} · Open-Meteo (ARPEGE/GFS)<br>MAJ : ${fmtT(d.timestamp+'Z')}`;
+    <div class="stat ${away?'ok':'warn'}"><div class="l">⚠️ Risque Bordeaux</div><div class="v">${away?'Faible':'À surveiller'}</div></div>
+    <div class="stat" style="grid-column:1/-1"><div class="l">🛰️ Dernier passage satellite</div><div class="v">${lastDet?fmtT(lastDet)+' ('+ago(lastDet)+')':'—'}</div></div>`;
+  $('src').innerHTML=`Foyers : NASA FIRMS ${sats?'('+sats+')':''} · Météo : Open-Meteo · Végétation : NDVI MODIS<br>Surveillance actualisée chaque heure · dernière vérif : ${fmtT(d.timestamp+'Z')}`;
 }
 function dirLabel(d){const dirs=['N','NE','E','SE','S','SO','O','NO'];return 'de '+dirs[Math.round(d/45)%8];}
 
@@ -256,9 +261,11 @@ function renderSim(i){
   (f.polygons||[]).forEach(poly=>{
     L.polygon(poly,{color:'#ff6d00',weight:1.5,fillColor:'#ff3d00',fillOpacity:.32}).addTo(simLayer);
   });
-  drawWind(i);
+  drawWind(f.hour!=null?f.hour:i);
   $('tlTime').textContent=fmtT(f.timestamp);
-  $('tlInfo').textContent=`${(f.area_ha||0).toLocaleString('fr-FR')} ha brûlés · vent ${f.wind_speed_ms} m/s · ${f.humidity_pct}% hum.`;
+  const j=Math.floor((f.hour||0)/24);
+  const day=j>0?` · J+${j}`:'';
+  $('tlInfo').textContent=`${(f.area_ha||0).toLocaleString('fr-FR')} ha${day} · vent ${f.wind_speed_ms} m/s · ${f.humidity_pct}% hum.`;
 }
 
 function togglePlay(){ state.playing?stop():play(); }

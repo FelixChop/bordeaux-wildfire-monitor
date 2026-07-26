@@ -60,7 +60,7 @@ def _shift(mask, di, dj):
 
 
 def simulate_fire_front(hotspots, wind_records, wind_field=None,
-                        veg_fuel=None, veg_bbox=None, max_hours=48):
+                        veg_fuel=None, veg_bbox=None, max_hours=48, emit_every=1):
     seeds = [(h['lat'], h['lon']) for h in hotspots if 'lat' in h and 'lon' in h]
     if not seeds or RegularGridInterpolator is None:
         return {'n_frames': 0, 'frames': [], 'n_seeds': len(seeds)}
@@ -68,7 +68,8 @@ def simulate_fire_front(hotspots, wind_records, wind_field=None,
     lats = np.array([s[0] for s in seeds])
     lons = np.array([s[1] for s in seeds])
 
-    margin = 0.18
+    # Bigger margin for longer runs so the front doesn't hit the grid edge.
+    margin = min(0.18 + max_hours * 0.0026, 0.65)
     lat_min, lat_max = lats.min() - margin, lats.max() + margin
     lon_min, lon_max = lons.min() - margin, lons.max() + margin
 
@@ -207,6 +208,11 @@ def simulate_fire_front(hotspots, wind_records, wind_field=None,
             residual = np.where(ready, residual - cell_lat_m, residual)
             if not grew.any():
                 break
+
+        # Emit a frame every `emit_every` hours (plus the very last one) to
+        # keep the payload small on long (7-day) runs.
+        if (h % emit_every != 0) and (h != n_hours - 1):
+            continue
 
         burning_mask = burned
         mean_speed = float(speed[burning_mask].mean()) if burning_mask.any() else 0.0

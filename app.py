@@ -33,59 +33,76 @@ UPDATE_INTERVAL = 3600  # Refresh every hour (seconds)
 latest_data = None
 last_update = None
 
+# Multiple NRT products => more satellite passes => fresher & denser coverage.
+_FIRMS_PRODUCTS = ['VIIRS_SNPP_NRT', 'VIIRS_NOAA20_NRT', 'VIIRS_NOAA21_NRT', 'MODIS_NRT']
+
+
+def _firms_confident(raw):
+    """VIIRS confidence is a letter (l/n/h); MODIS is 0-100. Keep nominal+high."""
+    raw = (raw or '').strip()
+    if raw in ('n', 'h'):
+        return True
+    if raw == 'l':
+        return False
+    try:
+        return float(raw) >= 70
+    except ValueError:
+        return False
+
+
+def _fetch_firms_product(map_key, product, bbox, days=5):
+    """Fetch one FIRMS product; return list of hotspot dicts."""
+    url = (f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{map_key}/"
+           f"{product}/{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}/{days}")
+    out = []
+    try:
+        r = requests.get(url, timeout=15)
+        if r.status_code != 200 or not r.text.strip():
+            return out
+        for row in csv.DictReader(io.StringIO(r.text)):
+            try:
+                if not _firms_confident(row.get('confidence')):
+                    continue
+                t = (row.get('acq_time') or '0').strip().zfill(4)
+                ts = f"{row.get('acq_date', '').strip()}T{t[:2]}:{t[2:]}:00Z"
+                out.append({
+                    'lat': float(row['latitude']),
+                    'lon': float(row['longitude']),
+                    'confidence': row.get('confidence', '').strip(),
+                    'frp': float(row.get('frp') or 0.0),
+                    'timestamp': ts,
+                    'sat': product.split('_')[0],
+                })
+            except (ValueError, KeyError, TypeError):
+                pass
+    except Exception as e:
+        print(f"FIRMS {product} error: {e}")
+    return out
+
+
 def fetch_nasa_firms():
-    """Fetch real-time fire hotspots."""
+    """Fetch real-time fire hotspots from several NRT satellites and merge them."""
     map_key = os.getenv('NASA_FIRMS_MAP_KEY', 'DEMO_KEY')
     bbox = (-1.5, 44.5, -0.5, 45.2)
 
-    # VIIRS S-NPP near-real-time; FIRMS area API caps day_range at 5.
-    # (Legacy MCD14DL / 7-day range now return HTTP 400.)
-    url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{map_key}/VIIRS_SNPP_NRT/{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}/5"
+    hotspots = []
+    for product in _FIRMS_PRODUCTS:
+        hotspots.extend(_fetch_firms_product(map_key, product, bbox))
 
-    def _is_confident(raw):
-        """VIIRS confidence is a letter (l/n/h); MODIS is 0-100. Keep nominal+high."""
-        raw = (raw or '').strip()
-        if raw in ('n', 'h'):
-            return True
-        if raw == 'l':
-            return False
-        try:
-            return float(raw) >= 80
-        except ValueError:
-            return False
-
-    try:
-        response = requests.get(url, timeout=15)
-        if response.status_code == 200 and response.text.strip():
-            reader = csv.DictReader(io.StringIO(response.text))
-            hotspots = []
-            for row in reader:
-                try:
-                    if _is_confident(row.get('confidence')):
-                        # acq_date=YYYY-MM-DD, acq_time=HHMM (UTC) -> ISO timestamp
-                        t = (row.get('acq_time') or '0').strip().zfill(4)
-                        ts = f"{row.get('acq_date', '').strip()}T{t[:2]}:{t[2:]}:00Z"
-                        hotspots.append({
-                            'lat': float(row['latitude']),
-                            'lon': float(row['longitude']),
-                            'confidence': row.get('confidence', '').strip(),
-                            'frp': float(row.get('frp') or 0.0),
-                            'timestamp': ts,
-                        })
-                except (ValueError, KeyError, TypeError):
-                    pass
-            return {'hotspots': hotspots, 'source': 'NASA FIRMS'}
-    except Exception as e:
-        print(f"FIRMS fetch error: {e}")
+    if hotspots:
+        last_ts = max((h['timestamp'] for h in hotspots), default=None)
+        sats = sorted({h.get('sat') for h in hotspots})
+        return {'hotspots': hotspots, 'source': 'NASA FIRMS',
+                'satellites': sats, 'last_detection': last_ts}
 
     # Fallback mock data
     return {
         'hotspots': [
-            {'lat': 44.85, 'lon': -1.205, 'confidence': 95},
-            {'lat': 44.86, 'lon': -1.22, 'confidence': 93},
-            {'lat': 44.87, 'lon': -1.23, 'confidence': 90},
+            {'lat': 44.85, 'lon': -1.205, 'confidence': 95, 'timestamp': None},
+            {'lat': 44.86, 'lon': -1.22, 'confidence': 93, 'timestamp': None},
+            {'lat': 44.87, 'lon': -1.23, 'confidence': 90, 'timestamp': None},
         ],
-        'source': 'MOCK (from real perimeter)'
+        'source': 'MOCK (from real perimeter)', 'satellites': [], 'last_detection': None
     }
 
 def fetch_extended_wind_forecast():
@@ -148,7 +165,7 @@ SIM_BBOX = (-1.5, 44.5, -0.5, 45.2)  # lon_min, lat_min, lon_max, lat_max
 _veg_cache = {'date': None, 'fuel': None, 'bbox': SIM_BBOX}
 
 
-def fetch_wind_field(n=6, hours=48):
+def fetch_wind_field(n=6, hours=192):
     """Grid of Open-Meteo wind+humidity forecasts for a spatial wind field."""
     lon0, lat0, lon1, lat1 = SIM_BBOX
     grid_lats = list(np.linspace(lat0, lat1, n))
@@ -163,7 +180,7 @@ def fetch_wind_field(n=6, hours=48):
             'latitude': ','.join(map(str, lats_q)),
             'longitude': ','.join(map(str, lons_q)),
             'hourly': 'wind_speed_10m,wind_direction_10m,relative_humidity_2m',
-            'forecast_days': 3, 'timezone': 'UTC',
+            'forecast_days': 8, 'timezone': 'UTC',
         }, timeout=20)
         if r.status_code != 200:
             return None
@@ -274,6 +291,12 @@ def update_data():
 
             last_update = datetime.utcnow()
             print(f"✓ Data updated. Fire distance: {dist_km:.1f} km")
+
+            try:
+                compute_simulation()  # pre-warm the 7-day sim so requests are instant
+                print("✓ Simulation pre-computed")
+            except Exception as e:
+                print(f"sim precompute error: {e}")
 
         except Exception as e:
             print(f"❌ Data fetch error: {e}")
@@ -423,20 +446,17 @@ def api_fire_history():
 _sim_cache = {'key': None, 'data': None}
 
 
-@app.route('/api/simulation')
-def api_simulation():
-    """Hour-by-hour multi-source fire propagation from every real hotspot."""
+def compute_simulation():
+    """Build (and cache) the 7-day propagation from the current data."""
     if not latest_data:
-        return jsonify({'error': 'No data available'}), 503
+        return None
     from src.fire_front import simulate_fire_front
     hotspots = latest_data['firms'].get('hotspots', [])
     wind = latest_data['wind'].get('hourly_wind', [])
-    # Start the simulation at the current hour (Open-Meteo starts at 00:00 UTC).
     now_key = datetime.utcnow().strftime('%Y-%m-%dT%H:00')
     future = [w for w in wind if (w.get('timestamp') or '') >= now_key]
     wind = future if future else wind
 
-    # Spatial wind field: keep only the future hours, aligned with `wind`.
     wf = None
     if _wind_field and _wind_field.get('times'):
         idx = [k for k, t in enumerate(_wind_field['times']) if (t or '') >= now_key]
@@ -451,16 +471,24 @@ def api_simulation():
             }
         else:
             wf = _wind_field
-
     fuel = _veg_cache.get('fuel')
 
-    key = f"{last_update}:{len(hotspots)}:{now_key}:{wf is not None}:{fuel is not None}"
+    key = f"{last_update}:{len(hotspots)}:{now_key}:{wf is not None}:{fuel is not None}:168"
     if _sim_cache['key'] != key:
         _sim_cache['data'] = simulate_fire_front(
-            hotspots, wind, wind_field=wf,
-            veg_fuel=fuel, veg_bbox=SIM_BBOX, max_hours=48)
+            hotspots, wind, wind_field=wf, veg_fuel=fuel, veg_bbox=SIM_BBOX,
+            max_hours=168, emit_every=3)  # 7 days, one frame every 3 h
         _sim_cache['key'] = key
-    return jsonify(_sim_cache['data'])
+    return _sim_cache['data']
+
+
+@app.route('/api/simulation')
+def api_simulation():
+    """Hour-by-hour multi-source fire propagation from every real hotspot."""
+    if not latest_data:
+        return jsonify({'error': 'No data available'}), 503
+    data = compute_simulation()
+    return jsonify(data if data is not None else {'error': 'No data'}), (200 if data else 503)
 
 
 @app.route('/api/vegetation.png')
