@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>🔥 Bordeaux — Risque Feu de Forêt</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+  <style>
+    :root{
+      --bg:#12100f; --panel:rgba(24,20,18,.92); --line:#3a2a22;
+      --fire:#ff5722; --fire2:#ff9800; --ok:#4caf50; --warn:#ffb300; --txt:#f5f0ec; --muted:#b8a79d;
+    }
+    *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+    html,body{height:100%;overflow:hidden}
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+      background:var(--bg);color:var(--txt);}
+    #map{position:fixed;inset:0;z-index:0;background:#0c0a09}
+
+    /* ---- top bar ---- */
+    .topbar{position:fixed;top:0;left:0;right:0;z-index:1000;display:flex;align-items:center;gap:8px;
+      padding:calc(env(safe-area-inset-top) + 10px) 12px 10px;
+      background:linear-gradient(180deg,rgba(12,10,9,.92),rgba(12,10,9,0));pointer-events:none}
+    .title{font-size:15px;font-weight:700;letter-spacing:.2px;text-shadow:0 1px 4px #000}
+    .title small{display:block;font-weight:500;color:var(--muted);font-size:11px}
+    .live{margin-left:auto;pointer-events:auto;display:flex;align-items:center;gap:6px;
+      background:rgba(0,0,0,.45);border:1px solid var(--line);border-radius:20px;padding:5px 10px;font-size:11px}
+    .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok);animation:pulse 2s infinite}
+    @keyframes pulse{50%{opacity:.35}}
+
+    /* ---- stats panel (bottom sheet on mobile, side card on desktop) ---- */
+    .panel{position:fixed;z-index:1000;background:var(--panel);backdrop-filter:blur(12px);
+      border:1px solid var(--line);color:var(--txt);
+      left:8px;right:8px;bottom:calc(var(--tl-h) + 8px);border-radius:16px;
+      max-height:46vh;overflow-y:auto;transition:max-height .3s ease;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+    .panel.collapsed{max-height:46px;overflow:hidden}
+    .panel.collapsed .body{display:none}
+    .panel-head{position:sticky;top:0;background:var(--panel);display:flex;align-items:center;gap:8px;
+      padding:12px 14px;border-bottom:1px solid var(--line);cursor:pointer;user-select:none}
+    .panel-head h2{font-size:13px;color:var(--fire2);letter-spacing:.5px;flex:1}
+    .chev{transition:transform .3s}
+    .panel.collapsed .chev{transform:rotate(180deg)}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:12px}
+    .stat{background:rgba(0,0,0,.28);border-left:3px solid var(--fire2);border-radius:8px;padding:8px 10px}
+    .stat .l{font-size:10.5px;color:var(--muted);margin-bottom:2px}
+    .stat .v{font-size:16px;font-weight:700}
+    .stat.warn{border-color:var(--warn)} .stat.ok{border-color:var(--ok)} .stat.fire{border-color:var(--fire)}
+    .src{padding:0 14px 14px;font-size:10px;color:var(--muted);line-height:1.5}
+
+    /* ---- timeline dock ---- */
+    :root{--tl-h:118px}
+    .timeline{position:fixed;left:0;right:0;bottom:0;z-index:1100;
+      padding:10px 12px calc(env(safe-area-inset-bottom) + 10px);
+      background:linear-gradient(0deg,rgba(12,10,9,.97),rgba(12,10,9,.82));border-top:1px solid var(--line)}
+    .modes{display:flex;gap:6px;margin-bottom:10px}
+    .mode{flex:1;text-align:center;font-size:12px;font-weight:600;padding:8px 6px;border-radius:10px;
+      background:rgba(255,255,255,.06);border:1px solid var(--line);color:var(--muted);cursor:pointer;transition:.15s}
+    .mode.active{background:var(--fire);border-color:var(--fire);color:#fff;box-shadow:0 2px 12px rgba(255,87,34,.4)}
+    .tl-row{display:flex;align-items:center;gap:10px}
+    .play{flex:0 0 auto;width:42px;height:42px;border-radius:50%;border:none;background:var(--fire);color:#fff;
+      font-size:17px;cursor:pointer;display:grid;place-items:center;box-shadow:0 2px 12px rgba(255,87,34,.4)}
+    .play:active{transform:scale(.94)}
+    .tl-main{flex:1;min-width:0}
+    .tl-label{display:flex;justify-content:space-between;font-size:11.5px;margin-bottom:4px}
+    .tl-label b{color:var(--fire2);font-variant-numeric:tabular-nums}
+    .tl-label span{color:var(--muted)}
+    input[type=range]{-webkit-appearance:none;width:100%;height:6px;border-radius:3px;
+      background:linear-gradient(90deg,var(--fire) var(--pct,0%),rgba(255,255,255,.15) var(--pct,0%));outline:none}
+    input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;
+      background:#fff;border:3px solid var(--fire);cursor:pointer;box-shadow:0 1px 6px rgba(0,0,0,.5)}
+    input[type=range]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:#fff;border:3px solid var(--fire);cursor:pointer}
+
+    .loading{position:fixed;inset:0;z-index:2000;display:grid;place-items:center;background:var(--bg);
+      text-align:center;transition:opacity .4s}
+    .loading.hide{opacity:0;pointer-events:none}
+    .spin{width:44px;height:44px;border:4px solid var(--line);border-top-color:var(--fire);border-radius:50%;
+      animation:rot 1s linear infinite;margin:0 auto 14px}
+    @keyframes rot{to{transform:rotate(360deg)}}
+
+    .vegtoggle{position:fixed;z-index:1000;right:8px;top:calc(env(safe-area-inset-top) + 52px);
+      pointer-events:auto;background:rgba(0,0,0,.55);border:1px solid var(--line);border-radius:20px;
+      padding:6px 11px;font-size:12px;font-weight:600;color:var(--muted);cursor:pointer;user-select:none}
+    .vegtoggle.on{background:rgba(46,125,50,.85);border-color:#2e7d32;color:#fff}
+    @media(min-width:820px){.vegtoggle{top:110px}}
+    .leaflet-bottom.leaflet-left{bottom:calc(var(--tl-h) + 4px)}
+    .legend{background:rgba(0,0,0,.6);border-radius:8px;padding:6px 9px;font-size:11px;line-height:1.7;color:#eee}
+    .legend i{display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+
+    /* ---- desktop ---- */
+    @media (min-width:820px){
+      :root{--tl-h:96px}
+      .title{font-size:18px}
+      .panel{left:auto;right:14px;top:64px;bottom:auto;width:330px;max-height:calc(100vh - 64px - var(--tl-h) - 24px)}
+      .panel.collapsed{transform:none}
+      .panel.collapsed .body{display:none}
+      .timeline{left:50%;right:auto;transform:translateX(-50%);width:min(680px,calc(100vw - 380px));
+        border:1px solid var(--line);border-radius:16px;bottom:14px}
+    }
+  </style>
+</head>
+<body>
+  <div class="loading" id="loading"><div><div class="spin"></div>Chargement des données temps réel…</div></div>
+
+  <div id="map"></div>
+
+  <div class="topbar">
+    <div class="title">🔥 Feu de forêt — Bordeaux<small>NASA FIRMS · vent Open-Meteo · végétation NDVI</small></div>
+    <div class="live"><span class="dot"></span><span id="liveTxt">en direct</span></div>
+  </div>
+
+  <div class="vegtoggle" id="vegBtn" onclick="toggleVeg()">🌲 Végétation</div>
+
+  <div class="panel collapsed" id="panel">
+    <div class="panel-head" onclick="togglePanel()">
+      <h2 id="panelTitle">📊 SITUATION</h2>
+      <span class="chev">▲</span>
+    </div>
+    <div class="body">
+      <div class="grid" id="stats"></div>
+      <div class="src" id="src"></div>
+    </div>
+  </div>
+
+  <div class="timeline">
+    <div class="modes">
+      <div class="mode active" id="mPast" onclick="setMode('past')">🔥 Feu réel (5 j passés)</div>
+      <div class="mode" id="mSim" onclick="setMode('sim')">🧪 Simulation (48 h)</div>
+    </div>
+    <div class="tl-row">
+      <button class="play" id="play" onclick="togglePlay()">▶</button>
+      <div class="tl-main">
+        <div class="tl-label"><b id="tlTime">—</b><span id="tlInfo"></span></div>
+        <input type="range" id="slider" min="0" max="0" value="0" step="1" oninput="onSlide(this.value)">
+      </div>
+    </div>
+  </div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js" crossorigin=""></script>
+<script>
+const BDX=[44.837,-0.579];
+const map=L.map('map',{zoomControl:false,attributionControl:false}).setView([44.9,-0.9],9);
+L.control.zoom({position:'topleft'}).addTo(map);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{maxZoom:19}).addTo(map);
+L.marker(BDX).addTo(map).bindPopup('Bordeaux');
+
+// layers
+let firePts=L.layerGroup().addTo(map);   // past hotspots
+let simLayer=L.layerGroup().addTo(map);   // simulation polygons
+let windLayer=L.layerGroup().addTo(map);  // wind-field arrows
+let heatLayer=null;
+
+let state={mode:'past', past:null, sim:null, data:null, idx:0, playing:false, timer:null};
+
+const $=id=>document.getElementById(id);
+const fmtT=iso=>{ if(!iso) return '—'; const d=new Date(iso.replace(' ','T'));
+  return d.toLocaleString('fr-FR',{weekday:'short',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}); };
+
+async function getJSON(url, tries=20){
+  for(let i=0;i<tries;i++){
+    const r=await fetch(url);
+    if(r.ok) return r.json();
+    if(r.status===503){ await new Promise(s=>setTimeout(s,3000)); continue; } // data warming up
+    throw new Error(url+' → '+r.status);
+  }
+  throw new Error(url+' : données indisponibles');
+}
+async function boot(){
+  try{
+    const data=await getJSON('/api/data');           // wait until data is warm
+    const [past,sim,wind]=await Promise.all([
+      getJSON('/api/fire-history'),
+      getJSON('/api/simulation'),
+      getJSON('/api/windfield').catch(()=>null)
+    ]);
+    state.data=data; state.past=past; state.sim=sim; state.wind=wind;
+    renderStats();
+    fitToFire();
+    setMode('past');
+    $('loading').classList.add('hide');
+  }catch(e){ $('loading').innerHTML='<div>Erreur de chargement.<br><small>'+e+'</small></div>'; }
+}
+
+function fitToFire(){
+  const pts=(state.past&&state.past.frames.length)?state.past.frames[state.past.frames.length-1].points:[];
+  if(pts.length){ const b=L.latLngBounds(pts.map(p=>[p.lat,p.lon])); b.extend(BDX); map.fitBounds(b,{padding:[50,50]}); }
+}
+
+function renderStats(){
+  const d=state.data; if(!d) return;
+  const fp=d.fire_perimeter, wind=(d.wind.hourly_wind||[]).slice(0,24);
+  const avgS=wind.length?wind.reduce((a,w)=>a+(w.wind_speed_10m_ms||0),0)/wind.length:0;
+  // circular mean of wind direction
+  let ss=0,cc=0; wind.forEach(w=>{const r=(w.wind_direction_10m_deg||0)*Math.PI/180; ss+=Math.sin(r); cc+=Math.cos(r);});
+  const avgD=(Math.atan2(ss,cc)*180/Math.PI+360)%360;
+  const away=fp.distance_to_bordeaux_km>20;
+  $('stats').innerHTML=`
+    <div class="stat fire"><div class="l">🔥 Distance du feu</div><div class="v">${fp.distance_to_bordeaux_km.toFixed(1)} km</div></div>
+    <div class="stat"><div class="l">🔴 Foyers actifs (5 j)</div><div class="v">${fp.n_hotspots}</div></div>
+    <div class="stat"><div class="l">💨 Vent moyen (24 h)</div><div class="v">${avgS.toFixed(1)} m/s ${dirLabel(avgD)}</div></div>
+    <div class="stat ${away?'ok':'warn'}"><div class="l">⚠️ Risque Bordeaux</div><div class="v">${away?'Faible':'À surveiller'}</div></div>`;
+  $('src').innerHTML=`Sources : ${state.past.source||'NASA FIRMS'} · Open-Meteo (ARPEGE/GFS)<br>MAJ : ${fmtT(d.timestamp+'Z')}`;
+}
+function dirLabel(d){const dirs=['N','NE','E','SE','S','SO','O','NO'];return 'de '+dirs[Math.round(d/45)%8];}
+
+function setMode(m){
+  state.mode=m; state.idx=0; stop();
+  $('mPast').classList.toggle('active',m==='past');
+  $('mSim').classList.toggle('active',m==='sim');
+  const n=(m==='past'?state.past.frames.length:state.sim.frames.length);
+  const sl=$('slider'); sl.max=Math.max(n-1,0); sl.value=n-1; // start at latest
+  $('panelTitle').textContent = m==='past'?'📊 SITUATION':'🧪 SIMULATION';
+  render(n-1);
+}
+
+function onSlide(v){ render(+v); }
+function render(i){
+  i=Math.max(0,Math.min(i, +$('slider').max)); state.idx=i; $('slider').value=i;
+  $('slider').style.setProperty('--pct',(i/Math.max(+$('slider').max,1)*100)+'%');
+  firePts.clearLayers(); simLayer.clearLayers(); windLayer.clearLayers();
+  if(heatLayer){ map.removeLayer(heatLayer); heatLayer=null; }
+  if(state.mode==='past') renderPast(i); else renderSim(i);
+}
+
+function windColor(s){ return s<5?'#4caf50':s<10?'#ffd54f':s<15?'#ff9800':'#ff3d00'; }
+function drawWind(i){
+  const w=state.wind; if(!w||!w.speed) return;
+  const k=Math.min(i, w.speed.length-1); if(k<0) return;
+  for(let a=0;a<w.grid_lats.length;a++){
+    for(let b=0;b<w.grid_lons.length;b++){
+      const s=w.speed[k][a][b], dir=w.dir[k][a][b];
+      const rot=(dir+90); // arrow ➤ points east by default; wind blows toward dir+180
+      const size=11+Math.min(s,20)*0.7;
+      const ic=L.divIcon({className:'wind-arrow',iconSize:[size,size],
+        html:`<div style="transform:rotate(${rot}deg);color:${windColor(s)};font-size:${size}px;line-height:${size}px;opacity:.9">➤</div>`});
+      L.marker([w.grid_lats[a],w.grid_lons[b]],{icon:ic,interactive:false,keyboard:false}).addTo(windLayer);
+    }
+  }
+}
+
+function renderPast(i){
+  const f=state.past.frames[i]; if(!f){ $('tlTime').textContent='Aucune donnée'; return; }
+  if(typeof L.heatLayer==='function'){
+    const pts=f.points.map(p=>[p.lat,p.lon, Math.min(0.25+(p.frp||0)/40,1)]);
+    heatLayer=L.heatLayer(pts,{radius:18,blur:22,maxZoom:12,minOpacity:.35,
+      gradient:{0.2:'#ffe082',0.4:'#ffb300',0.6:'#ff6d00',0.8:'#ff3d00',1:'#d50000'}}).addTo(map);
+  }else{
+    f.points.forEach(p=>L.circleMarker([p.lat,p.lon],
+      {radius:5,color:'#ff7043',weight:1,fillColor:'#ff3d00',fillOpacity:.6}).addTo(firePts));
+  }
+  $('tlTime').textContent=fmtT(f.timestamp);
+  $('tlInfo').textContent=`${f.total} foyers cumulés (+${f.new})`;
+}
+
+function renderSim(i){
+  const f=state.sim.frames[i]; if(!f){ $('tlTime').textContent='Aucune donnée'; return; }
+  (f.polygons||[]).forEach(poly=>{
+    L.polygon(poly,{color:'#ff6d00',weight:1.5,fillColor:'#ff3d00',fillOpacity:.32}).addTo(simLayer);
+  });
+  drawWind(i);
+  $('tlTime').textContent=fmtT(f.timestamp);
+  $('tlInfo').textContent=`${(f.area_ha||0).toLocaleString('fr-FR')} ha brûlés · vent ${f.wind_speed_ms} m/s · ${f.humidity_pct}% hum.`;
+}
+
+function togglePlay(){ state.playing?stop():play(); }
+function play(){
+  state.playing=true; $('play').textContent='⏸';
+  const max=+$('slider').max;
+  if(state.idx>=max) state.idx=0;
+  state.timer=setInterval(()=>{
+    if(state.idx>=max){ stop(); return; }
+    render(state.idx+1);
+  }, state.mode==='sim'?260:180);
+}
+function stop(){ state.playing=false; $('play').textContent='▶'; if(state.timer){clearInterval(state.timer);state.timer=null;} }
+
+function togglePanel(){ $('panel').classList.toggle('collapsed'); }
+
+let vegOverlay=null;
+function toggleVeg(){
+  const btn=$('vegBtn');
+  if(vegOverlay){ map.removeLayer(vegOverlay); vegOverlay=null; btn.classList.remove('on'); return; }
+  // SIM_BBOX = lon[-1.5,-0.5] lat[44.5,45.2]
+  vegOverlay=L.imageOverlay('/api/vegetation.png',[[44.5,-1.5],[45.2,-0.5]],
+    {opacity:.6,interactive:false}).addTo(map);
+  btn.classList.add('on');
+}
+
+const legend=L.control({position:'bottomleft'});
+legend.onAdd=function(){const d=L.DomUtil.create('div','legend');
+  d.innerHTML='<i style="background:#ff3d00"></i>Foyer / zone brûlée<br>'+
+    '<span style="color:#ffd54f">➤</span> vent (flèche = sens, couleur = force)';
+  return d;};
+legend.addTo(map);
+
+boot();
+</script>
+</body>
+</html>
