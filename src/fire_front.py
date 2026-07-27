@@ -441,14 +441,22 @@ def _smoke_series(store, ig_sel, emit_hours):
         # displacement in grid cells over 1 h (row 0 = north)
         dx = u_e * 3600 / (111_320 * mid_cos) / cell_lon_deg
         dy = -u_n * 3600 / 111_320 / cell_lat_deg
-        S = map_coordinates(S, [yy - dy, xx - dx], order=1, mode='constant')
-        S = gaussian_filter(S, sigma=0.7) * 0.93
         burning = ((ig_sel >= max(h - burn_win, 0)) & (ig_sel <= h)).mean(axis=0)
         if h < burn_win:
             burning = np.maximum(burning, dom['seed_mask'] * 1.0)
         emit = np.zeros((_SMK_NR, _SMK_NC))
         np.add.at(emit, (RI.ravel(), CI.ravel()), burning.ravel())
-        S = S + emit * Q
+        # Sub-step the advection so a fast plume SWEEPS through intermediate
+        # cells (Bordeaux included) instead of tunnelling over them when the
+        # hourly displacement exceeds the grid spacing.
+        nsub = max(1, int(np.ceil(max(abs(dx), abs(dy)) / 1.2)))
+        decay_sub = 0.93 ** (1.0 / nsub)
+        sig_sub = 0.7 / np.sqrt(nsub)
+        for _ in range(nsub):
+            S = map_coordinates(S, [yy - dy / nsub, xx - dx / nsub],
+                                order=1, mode='constant')
+            S = gaussian_filter(S, sigma=sig_sub) * decay_sub
+            S = S + emit * (Q / nsub)
         if h in emit_hours:
             out[h] = np.clip(S, 0, 300).round(0).astype(int).tolist()
     return out

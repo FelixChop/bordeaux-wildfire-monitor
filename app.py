@@ -1186,6 +1186,50 @@ def api_air_grid():
     return jsonify(_cached('airgrid', 1800, prod) or {'points': []})
 
 
+@app.route('/api/communes')
+def api_communes():
+    """Simplified commune boundaries (geo.api.gouv.fr) within the view."""
+    def prod():
+        r = requests.get('https://geo.api.gouv.fr/communes',
+                         params={'codeDepartement': '33', 'format': 'geojson',
+                                 'geometry': 'contour'}, timeout=60)
+        if r.status_code != 200:
+            return None
+        feats = []
+        for f in r.json().get('features', []):
+            geom = f.get('geometry') or {}
+            name = (f.get('properties') or {}).get('nom', '')
+            polys = (geom.get('coordinates') or [])
+            if geom.get('type') == 'Polygon':
+                polys = [polys]
+            out_polys = []
+            keep = False
+            for poly in polys:
+                rings = []
+                for ring in poly[:1]:            # outer ring only
+                    dec = [[round(x, 4), round(y, 4)]
+                           for i, (x, y) in enumerate(ring) if i % 3 == 0]
+                    if len(dec) < 4:
+                        continue
+                    if dec[0] != dec[-1]:
+                        dec.append(dec[0])
+                    rings.append(dec)
+                    if any(44.1 <= y <= 45.7 and -1.9 <= x <= -0.1 for x, y in dec[::10]):
+                        keep = True
+                if rings:
+                    out_polys.append(rings)
+            if keep and out_polys:
+                feats.append({'type': 'Feature',
+                              'properties': {'nom': name},
+                              'geometry': {'type': 'MultiPolygon',
+                                           'coordinates': out_polys}})
+        return {'type': 'FeatureCollection', 'features': feats}
+    data = _cached('communes', 7 * 86400, prod)
+    if data is None:
+        return jsonify({'type': 'FeatureCollection', 'features': []})
+    return jsonify(data)
+
+
 @app.route('/api/aircraft-history')
 def api_aircraft_history():
     """Recorded water-bomber positions (built by the host logger) for replay."""
