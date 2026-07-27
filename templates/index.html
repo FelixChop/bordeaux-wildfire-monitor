@@ -147,6 +147,16 @@
     @media(min-width:820px){.dash{top:200px}}
     .pyrocb{font-size:26px;filter:drop-shadow(0 0 6px rgba(255,140,0,.9));animation:storm 1.6s infinite}
     @keyframes storm{0%,100%{transform:scale(1);opacity:.85}50%{transform:scale(1.25);opacity:1}}
+    /* paroxysme pyroCb (replay du passé) : orage au-dessus du feu */
+    .pyrocloud{font-size:38px;animation:cloudpulse 1.3s infinite;
+      filter:drop-shadow(0 0 14px rgba(255,255,255,.65)) drop-shadow(0 0 26px rgba(255,120,0,.5))}
+    @keyframes cloudpulse{0%,100%{transform:scale(1)}50%{transform:scale(1.22)}}
+    .bolt{font-size:26px;animation:boltflash .75s infinite;filter:drop-shadow(0 0 10px #fff)}
+    .bolt.b2{animation-delay:.35s;font-size:21px}
+    @keyframes boltflash{0%,55%,100%{opacity:0}60%,75%{opacity:1}67%{opacity:.15}}
+    .paroxlabel{background:rgba(60,10,60,.85);border:1px solid #ce93d8;color:#fff;
+      font-weight:800;font-size:10px;letter-spacing:.8px;padding:3px 10px;border-radius:12px;
+      white-space:nowrap;animation:storm 1.3s infinite}
     /* mode simulation : voile bleuté + badge, mêmes couleurs de feu */
     .simveil{position:fixed;inset:0;z-index:600;pointer-events:none;display:none;
       box-shadow:inset 0 0 0 4px rgba(79,195,247,.75), inset 0 0 120px 30px rgba(2,60,110,.35)}
@@ -407,6 +417,18 @@ function buildTimeline(){
   }
   state.frames=pf.concat(sf);
   state.nowIdx=Math.max(pf.length-1,0);
+  // fenêtres de PAROXYSME pyroCb : somme de FRP réelle sur 4 h glissantes
+  const frpH=new Array(past.n_hours).fill(0);
+  (state.firePts||[]).forEach(p=>{const hh=Math.ceil(p.h);
+    if(hh>=0&&hh<past.n_hours) frpH[hh]+=(p.frp||0);});
+  state.parox=new Set();
+  let peak=0; const roll=new Array(past.n_hours).fill(0);
+  for(let h=0;h<past.n_hours;h++){
+    for(let d=0;d<4;d++) if(h-d>=0) roll[h]+=frpH[h-d];
+    peak=Math.max(peak,roll[h]);
+  }
+  const thr=Math.max(5000, peak*0.45);
+  for(let h=0;h<past.n_hours;h++) if(roll[h]>=thr) state.parox.add(h);
   state.simPts=[];
   emitted.forEach(g=>(g.new_points||[]).forEach(q=>state.simPts.push({lat:q[0],lon:q[1],h:q[2]})));
   const sl=$('slider'); sl.min=0; sl.max=Math.max(state.frames.length-1,0);
@@ -532,9 +554,34 @@ function renderPastFrame(f,i){
     });
   }
   drawWindAt(f.timestamp);
+  // ⚡ PAROXYSME : orage de feu probable à cet instant du passé
+  const parox=state.parox&&state.parox.has(h);
+  if(parox){
+    let sla=0,slo=0,sw=0;
+    (state.firePts||[]).forEach(p=>{const g=h-p.h;
+      if(g>=0&&g<4){const w=(p.frp||1);sla+=p.lat*w;slo+=p.lon*w;sw+=w;}});
+    if(sw>0){
+      const cla=sla/sw, clo=slo/sw;
+      const jit=x=>((h*9301+x*49297)%233280)/233280-0.5;   // pseudo-aléa stable par heure
+      const spots=[[0.02,0.0],[-0.012,0.05],[0.01,-0.045]];
+      spots.forEach((o,k2)=>{
+        const ic=L.divIcon({className:'',iconSize:[44,44],
+          html:`<div class="pyrocloud">⛈️</div>`});
+        L.marker([cla+o[0]+jit(k2)*0.02, clo+o[1]+jit(k2+7)*0.03],{icon:ic,interactive:false}).addTo(firePts);
+      });
+      for(let b=0;b<2;b++){
+        const ic=L.divIcon({className:'',iconSize:[30,30],
+          html:`<div class="bolt${b?' b2':''}">⚡</div>`});
+        L.marker([cla+jit(b+3)*0.06, clo+jit(b+11)*0.08],{icon:ic,interactive:false}).addTo(firePts);
+      }
+      const lbl=L.divIcon({className:'',iconSize:[190,20],
+        html:'<div class="paroxlabel">🌩️ PAROXYSME — ORAGE DE FEU PROBABLE</div>'});
+      L.marker([cla+0.07, clo],{icon:lbl,interactive:false}).addTo(firePts);
+    }
+  }
   const live=(i===state.nowIdx);
   const n=(state.firePts||[]).reduce((a,p)=>{const g=h-p.h;return a+(g>=0&&g<win?1:0);},0);
-  $('tlTime').textContent=(live?'● DIRECT · ':'⏪ ')+fmtT(f.timestamp);
+  $('tlTime').textContent=(parox?'⚡ ':'')+(live?'● DIRECT · ':'⏪ ')+fmtT(f.timestamp);
   $('tlTime').style.color=live?'#ff5252':'var(--fire2)';
   $('tlInfo').textContent=`${n} foyer(s) actif(s)`;
 }
