@@ -101,6 +101,20 @@
     .dash-title{font-size:12px;font-weight:700;color:var(--fire2);margin-bottom:8px}
     .dash-row{display:flex;align-items:center;justify-content:space-between;margin:6px 0}
     .dash-row>span{font-size:11.5px;color:var(--txt)}
+    .datamodal{position:fixed;z-index:1600;left:50%;top:50%;transform:translate(-50%,-50%);
+      width:min(560px,94vw);max-height:78vh;display:flex;flex-direction:column;
+      background:rgba(18,15,13,.98);border:1px solid var(--line);border-radius:14px;
+      box-shadow:0 10px 40px rgba(0,0,0,.6)}
+    .dm-head{padding:12px 14px;font-size:13px;font-weight:700;color:var(--fire2);
+      border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+    .dm-close{cursor:pointer;color:var(--muted);font-size:15px;padding:0 4px}
+    .dm-body{overflow:auto;padding:6px 10px;flex:1}
+    .dm-body table{border-collapse:collapse;width:100%;font:10.5px/1.5 ui-monospace,monospace}
+    .dm-body th{position:sticky;top:0;background:#241d18;color:var(--fire2);text-align:right;padding:3px 6px}
+    .dm-body td{text-align:right;padding:2px 6px;border-top:1px solid rgba(255,255,255,.05);color:#ddd}
+    .dm-body td:first-child,.dm-body th:first-child{text-align:left}
+    .dm-links{padding:9px 14px;font-size:11px;color:var(--muted);border-top:1px solid var(--line)}
+    .dm-links a{color:#4fc3f7;text-decoration:none;margin:0 2px}
     .views{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin:4px 0 2px}
     .views b{font-size:11px;font-weight:600;padding:7px 6px;border-radius:9px;cursor:pointer;
       text-align:center;background:rgba(255,255,255,.07);color:var(--muted);border:1px solid transparent}
@@ -152,6 +166,19 @@
 
   <div class="layers">
     <div class="lyr" id="dashBtn" onclick="toggleDash()">🎛️ Scénario</div>
+    <div class="lyr" id="dataBtn" onclick="toggleData()">📊 Données</div>
+  </div>
+
+  <div class="datamodal" id="datamodal" style="display:none">
+    <div class="dm-head">📊 Données brutes — <span id="dmView"></span>
+      <b class="dm-close" onclick="toggleData()">✕</b></div>
+    <div class="dm-body" id="dmBody"></div>
+    <div class="dm-links">JSON bruts :
+      <a id="dmSimLink" target="_blank">simulation</a> ·
+      <a href="/api/fire-history" target="_blank">foyers</a> ·
+      <a href="/api/windfield" target="_blank">vent</a> ·
+      <a href="/api/air-field" target="_blank">air</a> ·
+      <a href="/api/data" target="_blank">état</a></div>
   </div>
 
   <div class="dash" id="dash" style="display:none">
@@ -348,6 +375,26 @@ function toggleDash(){
   const d=$('dash'), on=d.style.display==='none';
   d.style.display=on?'block':'none';
   $('dashBtn').classList.toggle('on',on);
+}
+function toggleData(){
+  const m=$('datamodal'), on=m.style.display==='none';
+  if(on) buildDataModal();
+  m.style.display=on?'flex':'none';
+  $('dataBtn').classList.toggle('on',on);
+}
+function buildDataModal(){
+  const s=state.sim||{};
+  const names={ref:'🎯 Référence',opt:'🙂 Optimiste',pess:'⚠️ Pessimiste',pyro:'🌩️ Si pyroCb'};
+  $('dmView').textContent=`${names[state.view]||state.view} · ${s.n_runs||'?'} tirages (pyroCb dans ${s.pyro_runs??'?'}) · ${s.n_seeds||'?'} foyers de départ`;
+  $('dmSimLink').href='/api/scenario?view='+state.view;
+  let h='<table><tr><th>échéance (locale)</th><th>h</th><th>surface ha</th><th>p10</th><th>p90</th><th>vent m/s</th><th>hum %</th><th>air °C</th><th>+pts</th></tr>';
+  (s.frames||[]).forEach(f=>{
+    h+=`<tr><td>${fmtT(f.timestamp)}</td><td>+${f.hour}</td><td>${(f.area_ha||0).toLocaleString('fr-FR')}</td>`+
+       `<td>${(f.area_p10||0).toLocaleString('fr-FR')}</td><td>${(f.area_p90||0).toLocaleString('fr-FR')}</td>`+
+       `<td>${f.wind_speed_ms??''}</td><td>${f.humidity_pct??''}</td><td>${f.temp_c??''}</td>`+
+       `<td>${(f.new_points||[]).length}</td></tr>`;
+  });
+  $('dmBody').innerHTML=h+'</table>';
 }
 async function setView(v){
   state.view=v; state.scen.pyro=(v==='pyro')?'high':'low';
