@@ -342,14 +342,17 @@ function drawStations(d,layer){
   });
 }
 function drawTraffic(d,layer){
-  const style={FLUIDE:{color:'#2e7d32',weight:2,opacity:.5},
-    DENSE:{color:'#ff9800',weight:5,opacity:.9},EMBOUTEILLE:{color:'#d50000',weight:6,opacity:.95}};
-  (d.segments||[]).forEach(s=>{
-    const st=style[s.etat]||style.FLUIDE;
-    L.polyline(s.coords,{...st}).bindTooltip(`${s.voie||''} — ${s.etat.toLowerCase()}`).addTo(layer);
+  const inc=d.incidents||[];
+  inc.forEach(x=>{
+    const col=x.closed?'#d50000':(x.cat==='accident'?'#ff1744':x.cat==='travaux'?'#ffa000':'#ff6d00');
+    const label=`${x.cat}${x.road?' '+x.road:''}${x.delay?' · +'+Math.round(x.delay/60)+' min':''}`;
+    if(x.line&&x.line.length>1)
+      L.polyline(x.line,{color:col,weight:x.closed?6:5,opacity:.9}).bindTooltip(label).addTo(layer);
+    const emo=x.closed?'⛔':x.cat==='accident'?'⚠️':x.cat==='travaux'?'🚧':'🚗';
+    const ic=L.divIcon({className:'',iconSize:[18,18],
+      html:`<div style="font-size:14px;filter:drop-shadow(0 1px 2px #000)">${emo}</div>`});
+    L.marker(x.pt,{icon:ic}).bindTooltip(label+(x.desc?' — '+x.desc:'')).addTo(layer);
   });
-  const bad=(d.segments||[]).filter(s=>s.etat!=='FLUIDE').length;
-  if(bad) log(`🚦 ${bad} tronçon(s) dense/embouteillé`);
 }
 function drawAircraft(d,layer){
   const air=d.aircraft||[];

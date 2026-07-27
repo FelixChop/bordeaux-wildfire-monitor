@@ -710,30 +710,62 @@ def api_stations():
     return jsonify({'stations': _cached('stations', 86400, prod) or []})
 
 
+# TomTom traffic incidents across the whole region (2 tiles, each < 10 000 km²).
+_TT_TILES = ["-1.40,44.35,-0.78,45.20", "-0.86,44.45,-0.30,45.10"]
+_TT_FIELDS = ('{incidents{geometry{type,coordinates},properties{iconCategory,'
+              'magnitudeOfDelay,events{description},delay,length,roadNumbers}}}')
+_TT_CAT = {0: 'inconnu', 1: 'accident', 6: 'bouchon', 7: 'voie fermée',
+           8: 'route coupée', 9: 'travaux', 14: 'panne'}
+
+
 @app.route('/api/traffic')
 def api_traffic():
-    """Live road traffic (Bordeaux Métropole) — congestion & blockages."""
+    """Region-wide road traffic (TomTom): jams, accidents, impactful closures."""
     def prod():
-        r = requests.get(
-            "https://opendata.bordeaux-metropole.fr/api/records/1.0/search/",
-            params={'dataset': 'ci_trafi_l', 'rows': 1000}, timeout=20)
-        if r.status_code != 200:
+        key = os.getenv('TOMTOM_KEY')
+        if not key:
             return None
-        out, updated = [], None
-        for rec in r.json().get('records', []):
-            f = rec.get('fields', {})
-            etat = f.get('etat')
-            if etat in (None, 'INCONNU'):
+        out, seen = [], set()
+        for bbox in _TT_TILES:
+            r = requests.get(
+                "https://api.tomtom.com/traffic/services/5/incidentDetails",
+                params={'key': key, 'bbox': bbox, 'fields': _TT_FIELDS,
+                        'language': 'fr-FR'}, timeout=25)
+            if r.status_code != 200:
                 continue
-            gs = f.get('geo_shape', {})
-            if gs.get('type') != 'LineString':
-                continue
-            out.append({'etat': etat,
-                        'coords': [[c[1], c[0]] for c in gs['coordinates']],
-                        'voie': f.get('ident')})
-            updated = f.get('mdate') or updated
-        return {'segments': out, 'updated': updated}
-    data = _cached('traffic', 120, prod) or {'segments': [], 'updated': None}
+            for inc in r.json().get('incidents', []):
+                p = inc.get('properties', {})
+                g = inc.get('geometry', {})
+                cat = p.get('iconCategory')
+                delay = p.get('delay') or 0
+                # Keep only incidents with a real traffic impact (delay) or an
+                # accident. This drops the hundreds of permanent/forest-track
+                # "road closed" markers that carry no delay.
+                if not (cat == 1 or delay > 0):
+                    continue
+                coords = g.get('coordinates') or []
+                if g.get('type') == 'LineString' and coords:
+                    line = [[c[1], c[0]] for c in coords[::max(1, len(coords) // 20)]]
+                    pt = line[0]
+                elif g.get('type') == 'Point' and coords:
+                    line, pt = None, [coords[1], coords[0]]
+                else:
+                    continue
+                road = (p.get('roadNumbers') or [None])[0]
+                keyid = (round(pt[0], 4), round(pt[1], 4), cat)
+                if keyid in seen:
+                    continue
+                seen.add(keyid)
+                out.append({
+                    'cat': _TT_CAT.get(cat, 'incident'),
+                    'closed': cat in (7, 8),
+                    'road': road,
+                    'delay': delay,
+                    'desc': (p.get('events') or [{}])[0].get('description'),
+                    'line': line, 'pt': pt,
+                })
+        return {'incidents': out}
+    data = _cached('traffic', 120, prod) or {'incidents': []}
     return jsonify(data)
 
 
