@@ -85,7 +85,7 @@
       animation:rot 1s linear infinite;margin:0 auto 14px}
     @keyframes rot{to{transform:rotate(360deg)}}
 
-    .layers{position:fixed;z-index:1000;right:8px;top:calc(env(safe-area-inset-top) + 52px);
+    .layers{position:fixed;z-index:1000;right:8px;top:calc(env(safe-area-inset-top) + 10px);
       display:flex;flex-direction:column;gap:5px;align-items:flex-end;pointer-events:auto}
     .lyr{background:rgba(0,0,0,.55);border:1px solid var(--line);border-radius:20px;
       padding:5px 10px;font-size:11.5px;font-weight:600;color:var(--muted);cursor:pointer;user-select:none;white-space:nowrap}
@@ -130,8 +130,8 @@
     .simveil{position:fixed;inset:0;z-index:600;pointer-events:none;display:none;
       box-shadow:inset 0 0 160px 50px rgba(2,136,209,.30)}
     body.simmode .simveil{display:block}
-    .simbadge{position:fixed;z-index:1100;top:calc(env(safe-area-inset-top) + 46px);
-      left:50%;transform:translateX(-50%);display:none;background:rgba(2,119,189,.88);
+    .simbadge{position:fixed;z-index:1100;top:calc(env(safe-area-inset-top) + 10px);
+      left:8px;display:none;background:rgba(2,119,189,.88);
       color:#fff;font-weight:800;font-size:10.5px;letter-spacing:1.5px;
       padding:4px 13px;border-radius:14px;box-shadow:0 2px 10px rgba(0,0,0,.4)}
     body.simmode .simbadge{display:block}
@@ -159,10 +159,6 @@
   <div class="simveil"></div>
   <div class="simbadge">🔮 SIMULATION FUTURE</div>
 
-  <div class="topbar">
-    <div class="title">🔥 Feu de forêt — Bordeaux<small>NASA FIRMS · vent Open-Meteo · végétation NDVI</small></div>
-    <div class="live"><span class="dot"></span><span id="liveTxt">en direct</span></div>
-  </div>
 
   <div class="layers">
     <div class="lyr" id="dashBtn" onclick="toggleDash()">🎛️ Scénario</div>
