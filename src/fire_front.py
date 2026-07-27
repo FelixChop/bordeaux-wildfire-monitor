@@ -107,15 +107,21 @@ def _prepare_domain(hotspots, veg_fuel, veg_bbox, cell_deg=0.005):
 
 
 def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
-              want_meta=False, suppression=False):
+              want_meta=False, suppression=False, scenario=None):
     """One propagation run; returns per-cell ignition hour (-1 = never)."""
     p = pert or {}
+    sc = scenario or {}
     dir_off = p.get('dir_off', 0.0)
-    speed_mult = p.get('speed_mult', 1.0)
+    speed_mult = p.get('speed_mult', 1.0) * sc.get('speed_mult_g', 1.0)
     rh_off = p.get('rh_off', 0.0)
-    temp_off = p.get('temp_off', 0.0)
-    cal_mult = p.get('cal_mult', 1.0)
+    temp_off = p.get('temp_off', 0.0) + sc.get('temp_off_g', 0.0)
+    cal_mult = p.get('cal_mult', 1.0) * sc.get('pyro_cal', 1.0)
     supp_mult = p.get('supp_mult', 1.0)
+    supp_base = sc.get('supp_base', 0.75)
+    soil_off = sc.get('soil_off_g', 0.0)
+    dir_noise = p.get('dir_noise')          # per-hour array (pyroCb chaos)
+    spot_rate = sc.get('pyro_spot', 0.0)    # expected ember-spot fires per hour
+    rng = p.get('rng')
 
     nrows, ncols = dom['nrows'], dom['ncols']
     cell_lat_m = dom['cell_lat_m']
@@ -150,18 +156,20 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
     meta = [] if want_meta else None
 
     for h in range(n_hours):
+        d_extra = dir_off + (float(dir_noise[h]) if dir_noise is not None else 0.0)
         if have_field:
             speed = interp(sp_h[h]) * speed_mult
-            wdir = di_h[h] + dir_off
+            wdir = di_h[h] + d_extra
             pe = interp(-np.sin(np.radians(wdir)))
             pn = interp(-np.cos(np.radians(wdir)))
             rh = np.clip(interp(rh_h[h]) + rh_off, 3, 100)
             temp = interp(tp_h[h]) + temp_off if tp_h is not None else None
-            soil = interp(so_h[h]) if so_h is not None else None
+            soil = (np.clip(interp(so_h[h]) + soil_off, 0.02, 0.45)
+                    if so_h is not None else None)
         else:
             rec = wind_records[h]
             spd = float(rec.get('wind_speed_10m_ms') or 0.0) * speed_mult
-            wf = float(rec.get('wind_direction_10m_deg') or 270.0) + dir_off
+            wf = float(rec.get('wind_direction_10m_deg') or 270.0) + d_extra
             speed = np.full((nrows, ncols), spd)
             pe = np.full((nrows, ncols), -np.sin(np.radians(wf)))
             pn = np.full((nrows, ncols), -np.cos(np.radians(wf)))
@@ -183,7 +191,7 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
             # and varies between ensemble runs. Nominal peak: ~75 % ROS cut.
             ramp = min(1.0, h / 18.0)
             wind_pen = np.clip(1.15 - speed / 14.0, 0.25, 1.0)
-            eff = np.clip(0.75 * supp_mult * ramp * wind_pen, 0.0, 0.92)
+            eff = np.clip(supp_base * supp_mult * ramp * wind_pen, 0.0, 0.95)
             ros = ros * (1.0 - eff)
         residual += ros * 60.0
 
@@ -205,6 +213,31 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
                 break
         ign[burned & ~b0] = h
 
+        # PyroCumulonimbus spotting: the convective column lofts embers that
+        # ignite NEW fires kilometres AHEAD of the front, downwind.
+        if spot_rate > 0 and rng is not None:
+            n_spots = rng.poisson(spot_rate)
+            if n_spots:
+                recent = burned & (ign >= h - 3)
+                if h < 3:
+                    recent = recent | dom['seed_mask']
+                fr_r, fr_c = np.where(recent)
+                if len(fr_r):
+                    for _ in range(int(n_spots)):
+                        i = int(rng.integers(len(fr_r)))
+                        # 2–8 km downwind, ±20° scatter
+                        dist_m = float(rng.uniform(2000, 8000))
+                        ang = np.radians(float(rng.normal(0, 20)))
+                        ex, ny = pe_u[fr_r[i], fr_c[i]], pn_u[fr_r[i], fr_c[i]]
+                        ca, sa = np.cos(ang), np.sin(ang)
+                        ex2, ny2 = ex * ca - ny * sa, ex * sa + ny * ca
+                        rr = fr_r[i] + int(round(ny2 * dist_m / cell_lat_m))
+                        cc = fr_c[i] + int(round(ex2 * dist_m / cell_lat_m))
+                        if (0 <= rr < nrows and 0 <= cc < ncols
+                                and not burned[rr, cc] and fuel_grid[rr, cc] > 0.2):
+                            burned[rr, cc] = True
+                            ign[rr, cc] = h
+
         if want_meta:
             m = burned
             meta.append({
@@ -220,7 +253,7 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
 
 def simulate_monte_carlo(hotspots, wind_records, wind_field=None, veg_fuel=None,
                          veg_bbox=None, max_hours=168, emit_every=6, n_runs=16,
-                         rng_seed=0, suppression=False):
+                         rng_seed=0, suppression=False, scenario=None):
     """Ensemble forecast: mean burned footprint per future timestamp."""
     if binary_dilation is None:
         return {'n_frames': 0, 'frames': [], 'n_seeds': 0, 'n_runs': 0}
@@ -228,10 +261,11 @@ def simulate_monte_carlo(hotspots, wind_records, wind_field=None, veg_fuel=None,
     if dom is None:
         return {'n_frames': 0, 'frames': [], 'n_seeds': 0, 'n_runs': 0}
 
+    pyro_std = (scenario or {}).get('pyro_dir_std', 0.0)
     rng = np.random.default_rng(rng_seed)
     igns, meta = [], None
     for k in range(n_runs):
-        pert = None if k == 0 else {
+        pert = {} if k == 0 else {
             'dir_off': float(rng.normal(0, 15)),
             'speed_mult': float(np.exp(rng.normal(0, 0.15))),
             'rh_off': float(rng.normal(0, 8)),
@@ -239,9 +273,12 @@ def simulate_monte_carlo(hotspots, wind_records, wind_field=None, veg_fuel=None,
             'cal_mult': float(np.exp(rng.normal(0, 0.25))),
             'supp_mult': float(np.exp(rng.normal(0, 0.2))),
         }
+        if pyro_std > 0:   # pyroCb: erratic hourly wind swings, every run
+            pert['dir_noise'] = rng.normal(0, pyro_std, max_hours)
+        pert['rng'] = rng   # for ember-spotting draws
         ign, m, n_hours = _run_once(dom, wind_field, wind_records, max_hours,
                                     pert, want_meta=(k == 0),
-                                    suppression=suppression)
+                                    suppression=suppression, scenario=scenario)
         igns.append(ign)
         if k == 0:
             meta = m

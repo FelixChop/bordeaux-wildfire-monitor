@@ -95,6 +95,32 @@
     #staBtn.on{background:rgba(198,40,40,.85);border-color:#c62828}
     @media(min-width:820px){.layers{top:110px}}
     .leaflet-bottom.leaflet-left{bottom:calc(var(--tl-h) + 64px)}
+    .dash{position:fixed;z-index:1200;right:8px;top:calc(env(safe-area-inset-top) + 150px);
+      background:rgba(20,16,14,.95);border:1px solid var(--line);border-radius:14px;
+      padding:10px 12px;width:238px;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+    .dash-title{font-size:12px;font-weight:700;color:var(--fire2);margin-bottom:8px}
+    .dash-row{display:flex;align-items:center;justify-content:space-between;margin:6px 0}
+    .dash-row>span{font-size:11.5px;color:var(--txt)}
+    .seg{display:flex;gap:2px}
+    .seg b{font-size:10px;font-weight:600;padding:3px 7px;border-radius:8px;cursor:pointer;
+      background:rgba(255,255,255,.07);color:var(--muted);border:1px solid transparent}
+    .seg b.on{background:var(--fire);color:#fff}
+    .dash-note{font-size:9.5px;color:var(--muted);margin-top:7px;line-height:1.35}
+    .computing{position:fixed;z-index:1500;left:50%;top:14%;transform:translateX(-50%);
+      display:flex;align-items:center;background:rgba(20,16,14,.95);border:1px solid var(--fire);
+      border-radius:12px;padding:10px 16px;font-size:13px}
+    @media(min-width:820px){.dash{top:200px}}
+    .pyrocb{font-size:26px;filter:drop-shadow(0 0 6px rgba(255,140,0,.9));animation:storm 1.6s infinite}
+    @keyframes storm{0%,100%{transform:scale(1);opacity:.85}50%{transform:scale(1.25);opacity:1}}
+    /* mode simulation : voile bleuté + badge, mêmes couleurs de feu */
+    .simveil{position:fixed;inset:0;z-index:600;pointer-events:none;display:none;
+      box-shadow:inset 0 0 160px 50px rgba(2,136,209,.30)}
+    body.simmode .simveil{display:block}
+    .simbadge{position:fixed;z-index:1100;top:calc(env(safe-area-inset-top) + 46px);
+      left:50%;transform:translateX(-50%);display:none;background:rgba(2,119,189,.88);
+      color:#fff;font-weight:800;font-size:10.5px;letter-spacing:1.5px;
+      padding:4px 13px;border-radius:14px;box-shadow:0 2px 10px rgba(0,0,0,.4)}
+    body.simmode .simbadge{display:block}
     .legend{background:rgba(0,0,0,.6);border-radius:8px;padding:6px 9px;font-size:11px;line-height:1.7;color:#eee}
     .aclabel{background:rgba(2,119,189,.9)!important;border:none!important;color:#fff!important;font-weight:700;font-size:10.5px;padding:2px 6px!important;border-radius:6px!important;box-shadow:0 1px 4px #000}
     .aclabel:before{display:none!important}
@@ -116,6 +142,8 @@
   <div class="loading" id="loading"><div><div class="spin"></div>Chargement des données temps réel…</div></div>
 
   <div id="map"></div>
+  <div class="simveil"></div>
+  <div class="simbadge">🔮 SIMULATION FUTURE</div>
 
   <div class="topbar">
     <div class="title">🔥 Feu de forêt — Bordeaux<small>NASA FIRMS · vent Open-Meteo · végétation NDVI</small></div>
@@ -123,10 +151,19 @@
   </div>
 
   <div class="layers">
-    <div class="lyr" id="airqBtn" onclick="toggleAirQ()">🌫️ Qualité air</div>
-    <div class="lyr" id="trafBtn" onclick="toggleLayer('traffic')">🚦 Trafic</div>
-    <div class="lyr on" id="suppBtn" onclick="toggleSupp()">🚒 Avec lutte</div>
+    <div class="lyr" id="dashBtn" onclick="toggleDash()">🎛️ Scénario</div>
   </div>
+
+  <div class="dash" id="dash" style="display:none">
+    <div class="dash-title">🎛️ Scénario de simulation</div>
+    <div class="dash-row" data-f="pompiers"><span>🚒 Pompiers</span><div class="seg"></div></div>
+    <div class="dash-row" data-f="vent"><span>💨 Vent</span><div class="seg"></div></div>
+    <div class="dash-row" data-f="temp"><span>☀️ Température</span><div class="seg"></div></div>
+    <div class="dash-row" data-f="secheresse"><span>🏜️ Sécheresse</span><div class="seg"></div></div>
+    <div class="dash-row" data-f="pyro"><span>🌩️ PyroCb</span><div class="seg"></div></div>
+    <div class="dash-note" id="dashNote">réglages moyens = prévision de référence · combinaisons courantes précalculées</div>
+  </div>
+  <div class="computing" id="computing" style="display:none"><div class="spin" style="width:26px;height:26px;border-width:3px;margin:0 10px 0 0"></div>Calcul du scénario…</div>
 
   <div class="panel collapsed" id="panel">
     <div class="panel-head" onclick="togglePanel()">
@@ -190,15 +227,18 @@ async function getJSON(url, tries=20){
 async function boot(){
   try{
     const data=await getJSON('/api/data');           // wait until data is warm
-    const [past,simLutte,simLibre,wind,meteo]=await Promise.all([
+    const [past,sim,wind,meteo,airF]=await Promise.all([
       getJSON('/api/fire-history'),
-      getJSON('/api/simulation?mode=lutte',60),
-      getJSON('/api/simulation?mode=libre',60),
+      getJSON('/api/scenario',60),          // défaut : tout à "med"
       getJSON('/api/windfield').catch(()=>null),
-      fetch('/api/meteosat').then(r=>r.json()).catch(()=>null)
+      fetch('/api/meteosat').then(r=>r.json()).catch(()=>null),
+      fetch('/api/air-field').then(r=>r.ok?r.json():null).catch(()=>null)
     ]);
     state.data=data; state.wind=wind; state.meteo=meteo;
-    state.past=past; state.sims={lutte:simLutte,libre:simLibre}; state.simMode='lutte';
+    state.past=past; state.sim=sim; state.airField=airF;
+    state.airIdx={};
+    if(airF&&airF.times) airF.times.forEach((t,k)=>{state.airIdx[t.slice(0,13)]=k;});
+    initDash();
     // wind lookup by hour-timestamp (covers past 5 d + forecast 8 d)
     state.windIdx={};
     if(wind&&wind.times) wind.times.forEach((t,k)=>{state.windIdx[t.slice(0,13)]=k;});
@@ -208,6 +248,7 @@ async function boot(){
     renderStats();
     lockView();
     addVeg();             // vegetation base layer, always on
+    addAirOverlay();      // air quality layer, always on, follows the timeline
     goLive();             // start at the present
     $('loading').classList.add('hide');
   }catch(e){ $('loading').innerHTML='<div>Erreur de chargement.<br><small>'+e+'</small></div>'; }
@@ -261,26 +302,71 @@ function airTile(air){
 }
 
 function buildTimeline(){
-  const past=state.past, sim=state.sims[state.simMode]||{frames:[]};
+  const past=state.past, sim=state.sim||{frames:[]};
   const startMs=Date.parse(past.start);
   const pf=[]; for(let k=0;k<past.n_hours;k++)
     pf.push({kind:'past',hIdx:k,timestamp:new Date(startMs+k*3600e3).toISOString().slice(0,16)+'Z'});
-  const sf=(sim.frames||[]).map(f=>({kind:'sim',...f}));
+  // Échelle RÉGULIÈRE : 1 cran = 1 heure, futur compris. Chaque heure future
+  // reprend les données du frame simulé émis le plus proche (<= H).
+  const emitted=sim.frames||[];
+  const sf=[];
+  if(emitted.length){
+    const simStartMs=Date.parse(emitted[0].timestamp);
+    const maxH=emitted[emitted.length-1].hour||0;
+    let ptr=0;
+    for(let H=0;H<=maxH;H++){
+      while(ptr+1<emitted.length&&(emitted[ptr+1].hour||0)<=H) ptr++;
+      const src=emitted[ptr];
+      sf.push({kind:'sim',hour:H,
+        timestamp:new Date(simStartMs+H*3600e3).toISOString().slice(0,16)+'Z',
+        area_ha:src.area_ha,area_p10:src.area_p10,area_p90:src.area_p90,
+        wind_speed_ms:src.wind_speed_ms,humidity_pct:src.humidity_pct,temp_c:src.temp_c});
+    }
+  }
   state.frames=pf.concat(sf);
   state.nowIdx=Math.max(pf.length-1,0);
   state.simPts=[];
-  sf.forEach(g=>(g.new_points||[]).forEach(q=>state.simPts.push({lat:q[0],lon:q[1],h:q[2]})));
+  emitted.forEach(g=>(g.new_points||[]).forEach(q=>state.simPts.push({lat:q[0],lon:q[1],h:q[2]})));
   const sl=$('slider'); sl.min=0; sl.max=Math.max(state.frames.length-1,0);
   document.documentElement.style.setProperty('--nowpct',
     (state.nowIdx/Math.max(state.frames.length-1,1)*100)+'%');
 }
-function toggleSupp(){
-  state.simMode=(state.simMode==='lutte')?'libre':'lutte';
-  $('suppBtn').classList.toggle('on', state.simMode==='lutte');
-  $('suppBtn').textContent=(state.simMode==='lutte')?'🚒 Avec lutte':'🔥 Feu libre';
-  const keep=Math.min(state.idx, state.frames.length-1);
-  buildTimeline();
-  render(Math.min(keep, +$('slider').max));
+
+// ---- scenario dashboard ----
+state.scen={pompiers:'med',vent:'med',temp:'med',secheresse:'med',pyro:'med'};
+const LVLS=['low','med','high'];
+function initDash(){
+  document.querySelectorAll('.dash-row').forEach(row=>{
+    const f=row.dataset.f, seg=row.querySelector('.seg');
+    seg.innerHTML=LVLS.map(l=>`<b data-l="${l}" class="${state.scen[f]===l?'on':''}">${l}</b>`).join('');
+    seg.querySelectorAll('b').forEach(b=>b.onclick=()=>setFactor(f,b.dataset.l));
+  });
+}
+function toggleDash(){
+  const d=$('dash'), on=d.style.display==='none';
+  d.style.display=on?'block':'none';
+  $('dashBtn').classList.toggle('on',on);
+}
+let scenTimer=null;
+function setFactor(f,l){
+  state.scen[f]=l; initDash();
+  const def=Object.values(state.scen).every(v=>v==='med');
+  $('dashNote').textContent=def?'réglages moyens = prévision de référence'
+    :'scénario personnalisé — la simulation reflète tes réglages';
+  clearTimeout(scenTimer);
+  scenTimer=setTimeout(loadScenario, 600);   // debounce multi-clics
+}
+async function loadScenario(){
+  $('computing').style.display='flex';
+  try{
+    const qs=Object.entries(state.scen).map(([k,v])=>`${k}=${v}`).join('&');
+    const sim=await getJSON('/api/scenario?'+qs, 80);
+    state.sim=sim;
+    const keep=state.idx;
+    buildTimeline();
+    render(Math.min(keep, +$('slider').max));
+  }catch(e){}
+  $('computing').style.display='none';
 }
 function onSlide(v){ if(state.playing) stop(); render(+v); }
 function render(i){
@@ -288,7 +374,9 @@ function render(i){
   firePts.clearLayers(); simLayer.clearLayers(); windLayer.clearLayers();
   const f=state.frames[i]; if(!f){ $('tlTime').textContent='—'; return; }
   $('liveBtn').classList.toggle('on', i===state.nowIdx);
+  document.body.classList.toggle('simmode', f.kind==='sim');
   if(f.kind==='past') renderPastFrame(f,i); else renderSimFrame(f,i);
+  renderAirAt(f);
 }
 function goLive(){ if(state.playing) stop(); render(state.nowIdx); }
 
@@ -319,16 +407,11 @@ function ageStyle(age,frp){
   if(age<18) return {col:'#d32f2f',op:.55,r:base-1};   // décline
   return       {col:'#7f0000',op:.32,r:Math.max(base-2,2)}; // braise mourante
 }
-// simulated fire: same lifecycle, blue family
-function simStyle(age){
-  if(age<3)  return {col:'#4dd0ff',op:.95,r:5};
-  if(age<8)  return {col:'#29b6f6',op:.85,r:4};
-  if(age<16) return {col:'#0277bd',op:.65,r:4};
-  return       {col:'#01427a',op:.45,r:3};
-}
 const SCAR={col:'#141414',op:.55,r:3};   // végétation brûlée
-function drawPoint(p,st,layer){
-  L.circleMarker([p.lat,p.lon],{radius:st.r,color:st.col,weight:.5,
+function drawPoint(p,st,layer,simulated){
+  // simulation : MÊMES couleurs que le réel, mais liseré cyan fin
+  L.circleMarker([p.lat,p.lon],{radius:st.r,
+    color:simulated?'#4dd0ff':st.col,weight:simulated?1.1:.5,
     fillColor:st.col,fillOpacity:st.op}).addTo(layer);
 }
 function renderPastFrame(f,i){
@@ -363,12 +446,25 @@ function renderSimFrame(f,i){
     if(age<0) return;
     drawPoint(p, age<state.winH?ageStyle(age,p.frp):SCAR, firePts);
   });
-  // Simulated ignitions: same point UI, blue lifecycle, then black scar too.
+  // Simulated ignitions: same colours as real fire, cyan outline = simulated.
+  const front=[];
   (state.simPts||[]).forEach(p=>{
     const age=H-p.h;
     if(age<0) return;
-    drawPoint(p, age<state.winH?simStyle(age):SCAR, simLayer);
+    if(age<6) front.push(p);
+    const active=age<state.winH;
+    drawPoint(p, active?ageStyle(age,20):SCAR, simLayer, active); // cicatrices sans liseré
   });
+  // PyroCumulonimbus : orages de feu au-dessus du front actif
+  if(state.scen.pyro!=='low'&&front.length){
+    const n=state.scen.pyro==='high'?3:1;
+    for(let s=0;s<n;s++){
+      const p=front[Math.floor((s+0.5)*front.length/n)];
+      const ic=L.divIcon({className:'',iconSize:[34,34],
+        html:'<div class="pyrocb">⛈️</div>'});
+      L.marker([p.lat+0.012,p.lon],{icon:ic,interactive:false}).addTo(simLayer);
+    }
+  }
   drawWindAt(f.timestamp);
   const j=Math.floor((f.hour||0)/24);
   $('tlTime').textContent=`🔮 ${fmtT(f.timestamp)}`;
@@ -406,21 +502,103 @@ const LYR={
   traffic :{btn:'trafBtn',layer:L.layerGroup(), url:'/api/traffic',  refresh:90, draw:drawTraffic},
 };
 
-// smooth CAMS-based air-quality field (wind dispersion already modeled upstream)
-let airqOverlay=null, airqTimer=null;
-function toggleAirQ(){
-  const btn=$('airqBtn');
-  if(airqOverlay){
-    map.removeLayer(airqOverlay); airqOverlay=null; btn.classList.remove('on');
-    if(airqTimer){clearInterval(airqTimer);airqTimer=null;} return;
+// ---- air quality: ALWAYS on, evolves with the timeline -----------------
+// past/now = real hourly CAMS field; sim = CAMS forecast base + the smoke
+// plume of the simulated fire, advected downwind.
+let airOverlay=null;
+const AIRW=64, AIRH=48, AIRSC=8;
+const airCvs=document.createElement('canvas'); airCvs.width=AIRW; airCvs.height=AIRH;
+const airBig=document.createElement('canvas'); airBig.width=AIRW*AIRSC; airBig.height=AIRH*AIRSC;
+function aqiRGB(v){ // même échelle que le backend (0..120)
+  const stops=[[0,[46,125,50]],[21.6,[139,195,74]],[40.8,[205,220,57]],
+    [60,[255,179,0]],[79.2,[251,140,0]],[98.4,[229,57,53]],[120,[142,36,170]]];
+  const x=Math.max(0,Math.min(v,120));
+  for(let i=1;i<stops.length;i++){
+    if(x<=stops[i][0]){
+      const [x0,c0]=stops[i-1],[x1,c1]=stops[i];
+      const t=(x-x0)/(x1-x0);
+      return [0,1,2].map(j=>Math.round(c0[j]+(c1[j]-c0[j])*t));
+    }
   }
-  const add=()=>{
-    if(airqOverlay) map.removeLayer(airqOverlay);
-    airqOverlay=L.imageOverlay('/api/air-quality.png?t='+Date.now(),
-      [[44.45,-1.45],[45.20,-0.35]],{opacity:.8,interactive:false}).addTo(map);
-  };
-  add(); btn.classList.add('on');
-  airqTimer=setInterval(add, 1800*1000);
+  return stops[stops.length-1][1];
+}
+function addAirOverlay(){
+  const af=state.airField;
+  if(!af){ // fallback : image statique
+    airOverlay=overlayWithRetry('/api/air-quality.png',[[44.45,-1.45],[45.20,-0.35]],
+      {opacity:.8,interactive:false}).addTo(map);
+    return;
+  }
+  const [la0,lo0,la1,lo1]=af.bbox;
+  airOverlay=L.imageOverlay('', [[la0,lo0],[la1,lo1]],{opacity:.8,interactive:false}).addTo(map);
+}
+function renderAirAt(f){
+  const af=state.airField; if(!af||!airOverlay||!airOverlay.setUrl) return;
+  let k=state.airIdx[(f.timestamp||'').slice(0,13)];
+  if(k==null) k=af.times.length-1;                       // clamp au dernier connu
+  const base=af.aqi[Math.min(k,af.aqi.length-1)];        // 8 x 10
+  const [la0,lo0,la1,lo1]=af.bbox;
+  const nl=base.length, nc=base[0].length;
+  // grille fine bilinéaire
+  const fine=new Float32Array(AIRW*AIRH);
+  for(let y=0;y<AIRH;y++){
+    const gy=(1-y/(AIRH-1))*(nl-1);                      // ligne 0 = nord
+    const i0=Math.min(Math.floor(gy),nl-2), ty=gy-i0;
+    for(let x=0;x<AIRW;x++){
+      const gx=x/(AIRW-1)*(nc-1);
+      const j0=Math.min(Math.floor(gx),nc-2), tx=gx-j0;
+      fine[y*AIRW+x]=base[i0][j0]*(1-ty)*(1-tx)+base[i0+1][j0]*ty*(1-tx)
+                    +base[i0][j0+1]*(1-ty)*tx+base[i0+1][j0+1]*ty*tx;
+    }
+  }
+  // panache du feu SIMULÉ (frames futures uniquement)
+  if(f.kind==='sim'){
+    const H=f.hour||0, effH=state.nowIdx+H;
+    const wk=state.windIdx[(f.timestamp||'').slice(0,13)];
+    const w=state.wind;
+    const srcs=[];
+    (state.firePts||[]).forEach(p=>{const a=effH-p.h; if(a>=0&&a<24) srcs.push([p.lat,p.lon,1-a/24]);});
+    (state.simPts||[]).forEach(p=>{const a=H-p.h; if(a>=0&&a<24) srcs.push([p.lat,p.lon,1-a/24]);});
+    const step=Math.max(1,Math.ceil(srcs.length/1200));  // plafond perf
+    for(let s=0;s<srcs.length;s+=step){
+      const [la,lo,wgt]=srcs[s];
+      let spd=8,dir=270;
+      if(w&&wk!=null){
+        const ai=Math.max(0,Math.min(w.grid_lats.length-1,Math.round((la-w.grid_lats[0])/(w.grid_lats[w.grid_lats.length-1]-w.grid_lats[0])*(w.grid_lats.length-1))));
+        const bi=Math.max(0,Math.min(w.grid_lons.length-1,Math.round((lo-w.grid_lons[0])/(w.grid_lons[w.grid_lons.length-1]-w.grid_lons[0])*(w.grid_lons.length-1))));
+        spd=w.speed[wk][ai][bi]; dir=w.dir[wk][ai][bi];
+      }
+      const rad=(dir+180)*Math.PI/180;                   // le panache part sous le vent
+      const ux=Math.sin(rad), uy=Math.cos(rad);
+      const stepDeg=0.004+spd*0.0035;
+      for(let st=0;st<4;st++){
+        const pla=la+uy*stepDeg*st, plo=lo+ux*stepDeg*st*1.35;
+        const cx=Math.round((plo-lo0)/(lo1-lo0)*(AIRW-1));
+        const cy=Math.round((1-(pla-la0)/(la1-la0))*(AIRH-1));
+        const amp=[40,28,18,10][st]*wgt*step;
+        const rr=1+st;                                    // le panache s'élargit
+        for(let dy=-rr;dy<=rr;dy++)for(let dx=-rr;dx<=rr;dx++){
+          const X=cx+dx,Y=cy+dy;
+          if(X<0||X>=AIRW||Y<0||Y>=AIRH) continue;
+          fine[Y*AIRW+X]+=amp*Math.exp(-(dx*dx+dy*dy)/(rr*rr+1));
+        }
+      }
+    }
+  }
+  // colormap -> canvas -> upscale lissé -> overlay
+  const ctx=airCvs.getContext('2d');
+  const img=ctx.createImageData(AIRW,AIRH);
+  for(let i=0;i<AIRW*AIRH;i++){
+    const v=fine[i], [r,g,b]=aqiRGB(v);
+    img.data[i*4]=r; img.data[i*4+1]=g; img.data[i*4+2]=b;
+    img.data[i*4+3]=Math.round(255*Math.min(.2+Math.min(v,120)/120*.6,.8));
+  }
+  ctx.putImageData(img,0,0);
+  const bctx=airBig.getContext('2d');
+  bctx.imageSmoothingEnabled=true; bctx.imageSmoothingQuality='high';
+  bctx.clearRect(0,0,airBig.width,airBig.height);
+  bctx.drawImage(airCvs,0,0,airBig.width,airBig.height);
+  airOverlay.setUrl(airBig.toDataURL());
 }
 // retry image overlays that failed while the backend was still warming up
 function overlayWithRetry(url,bounds,opts){

@@ -498,15 +498,131 @@ def api_fire_history():
 _sim_cache = {'key': None, 'data': None}
 _sim_lock = __import__('threading').Lock()
 
+# ---- interactive scenario dashboard ---------------------------------------
+_LVL = ('low', 'med', 'high')
+_SCEN_FACTORS = ('pompiers', 'vent', 'temp', 'secheresse', 'pyro')
+_scenario_cache = {}   # levels-key -> {'ver':…, 'data':…}
+
+
+def _scenario_mods(p, v, t, s, y):
+    return {
+        'supp_base':   {'low': 0.0, 'med': 0.75, 'high': 0.95}[p],
+        'speed_mult_g': {'low': 0.6, 'med': 1.0, 'high': 1.5}[v],
+        'temp_off_g':  {'low': -5.0, 'med': 0.0, 'high': 6.0}[t],
+        'soil_off_g':  {'low': 0.12, 'med': 0.0, 'high': -0.10}[s],
+        'pyro_cal':    {'low': 1.0, 'med': 1.15, 'high': 1.35}[y],
+        'pyro_dir_std': {'low': 0.0, 'med': 20.0, 'high': 40.0}[y],
+        'pyro_spot':   {'low': 0.0, 'med': 0.6, 'high': 1.8}[y],
+    }
+
+
+def _sim_inputs():
+    """(active hotspots, wind series, sliced wind field, fuel) for a sim run."""
+    now_dt = datetime.utcnow()
+    active = []
+    for h in latest_data['firms'].get('hotspots', []):
+        dt = _parse_ts(h.get('timestamp'))
+        if dt and (now_dt - dt) <= timedelta(hours=ACTIVE_WINDOW_H):
+            active.append(h)
+    wind = latest_data['wind'].get('hourly_wind', [])
+    now_key = now_dt.strftime('%Y-%m-%dT%H:00')
+    future = [w for w in wind if (w.get('timestamp') or '') >= now_key]
+    wind = future if future else wind
+    wf = None
+    if _wind_field and _wind_field.get('times'):
+        idx = [k for k, t in enumerate(_wind_field['times']) if (t or '') >= now_key]
+        if idx:
+            wf = {k: (_wind_field[k] if k in ('grid_lats', 'grid_lons')
+                      else [_wind_field['times'][i] for i in idx] if k == 'times'
+                      else (_wind_field[k][idx] if _wind_field.get(k) is not None else None))
+                  for k in ('grid_lats', 'grid_lons', 'times', 'speed', 'dir',
+                            'rh', 'temp', 'soil')}
+    return active, wind, wf, _veg_cache.get('fuel'), now_key
+
+
+def compute_scenario(levels, n_runs):
+    """Compute (or serve cached) ensemble for a levels tuple."""
+    if not latest_data:
+        return None
+    from src.fire_front import simulate_monte_carlo
+    key = ','.join(levels)
+    ver = f"{last_update}:{datetime.utcnow().strftime('%dT%H')}"
+    ent = _scenario_cache.get(key)
+    if ent and ent['ver'] == ver:
+        return ent['data']
+    with _sim_lock:      # serialize heavy computations
+        ent = _scenario_cache.get(key)
+        if ent and ent['ver'] == ver:
+            return ent['data']
+        hotspots, wind, wf, fuel, _ = _sim_inputs()
+        mods = _scenario_mods(*levels)
+        data = simulate_monte_carlo(
+            hotspots, wind, wind_field=wf, veg_fuel=fuel, veg_bbox=SIM_BBOX,
+            max_hours=168, emit_every=3, n_runs=n_runs,
+            suppression=(mods['supp_base'] > 0), scenario=mods)
+        for f in data.get('frames', []):
+            ts = f.get('timestamp')
+            if ts and not ts.endswith('Z'):
+                f['timestamp'] = ts + 'Z'
+        data['levels'] = dict(zip(_SCEN_FACTORS, levels))
+        if len(_scenario_cache) > 24:
+            _scenario_cache.clear()
+        _scenario_cache[key] = {'ver': ver, 'data': data}
+        return data
+
+
+@app.route('/api/scenario')
+def api_scenario():
+    """Ensemble forecast for user-chosen factor levels (low/med/high)."""
+    if not latest_data:
+        return jsonify({'error': 'No data available'}), 503
+    levels = tuple(
+        request.args.get(f, 'med') if request.args.get(f, 'med') in _LVL else 'med'
+        for f in _SCEN_FACTORS)
+    default = all(l == 'med' for l in levels)
+    data = compute_scenario(levels, int(os.getenv('MC_RUNS', '8')) if default
+                            else int(os.getenv('SCEN_RUNS', '4')))
+    return jsonify(data if data else {'error': 'Computing'}), (200 if data else 503)
+
+
+def _precompute_combos():
+    """Scenario combos precomputed hourly so users are pure consumers:
+    reference + each factor varied one-at-a-time + extreme corners."""
+    combos = [('med',) * 5]
+    for i in range(5):
+        for lv in ('low', 'high'):
+            c = ['med'] * 5
+            c[i] = lv
+            combos.append(tuple(c))
+    combos += [
+        ('low', 'high', 'high', 'high', 'high'),   # pire cas absolu
+        ('high', 'high', 'high', 'high', 'high'),  # conditions extrêmes + lutte max
+        ('high', 'med', 'med', 'med', 'med'),
+        ('low', 'low', 'low', 'low', 'low'),
+    ]
+    return combos
+
 
 def compute_simulation():
-    """Build (and cache) the 7-day Monte-Carlo ensemble from current data."""
+    """Precompute scenario ensembles in background (users only consume)."""
+    if not latest_data:
+        return None
+    default = compute_scenario(('med',) * 5, int(os.getenv('MC_RUNS', '8')))
+    n = int(os.getenv('SCEN_RUNS', '4'))
+    for combo in _precompute_combos()[1:]:
+        try:
+            compute_scenario(combo, n)
+        except Exception as e:
+            print(f"precompute {combo} error: {e}")
+    print(f"✓ {len(_scenario_cache)} scénarios en cache")
+    return {'lutte': default}
+
+
+def _obsolete_compute_simulation():
     if not latest_data:
         return None
     from src.fire_front import simulate_monte_carlo
     now_dt = datetime.utcnow()
-    # Seed ONLY the currently active fires (recent detections), not 5 days of
-    # mostly-extinct history.
     active = []
     for h in latest_data['firms'].get('hotspots', []):
         dt = _parse_ts(h.get('timestamp'))
@@ -1022,6 +1138,49 @@ def api_air_quality_png():
         return jsonify({'error': 'No air data'}), 503
     return Response(png, mimetype='image/png',
                     headers={'Cache-Control': 'public, max-age=900'})
+
+
+@app.route('/api/air-field')
+def api_air_field():
+    """Hourly air-quality field (CAMS EAQI) on a grid: past 5 d + forecast 7 d.
+
+    Lets the client colour the air per timeline frame; on simulation frames it
+    adds the smoke plume of the simulated fire on top.
+    """
+    def prod():
+        n_lat, n_lon = 8, 10
+        lat0, lat1, lon0, lon1 = 44.45, 45.20, -1.45, -0.35
+        lats = np.linspace(lat0, lat1, n_lat)
+        lons = np.linspace(lon0, lon1, n_lon)
+        laq, loq = [], []
+        for la in lats:
+            for lo in lons:
+                laq.append(round(float(la), 3))
+                loq.append(round(float(lo), 3))
+        r = requests.get('https://air-quality-api.open-meteo.com/v1/air-quality', params={
+            'latitude': ','.join(map(str, laq)), 'longitude': ','.join(map(str, loq)),
+            'hourly': 'european_aqi', 'past_days': 5, 'forecast_days': 7,
+            'timezone': 'UTC'}, timeout=30)
+        if r.status_code != 200:
+            return None
+        res = r.json()
+        if isinstance(res, dict):
+            res = [res]
+        times = res[0].get('hourly', {}).get('time', [])
+        T = len(times)
+        aqi = np.zeros((T, n_lat, n_lon))
+        for idx, x in enumerate(res[:n_lat * n_lon]):
+            arr = x.get('hourly', {}).get('european_aqi') or []
+            i, j = idx // n_lon, idx % n_lon
+            for t in range(min(T, len(arr))):
+                aqi[t, i, j] = arr[t] if arr[t] is not None else 0
+        return {'times': times,
+                'bbox': [lat0, lon0, lat1, lon1],
+                'aqi': aqi.round(0).tolist()}
+    data = _cached('airfield', 1800, prod)
+    if data is None:
+        return jsonify({'error': 'No air field'}), 503
+    return jsonify(data)
 
 
 @app.route('/api/air-grid')
