@@ -94,7 +94,7 @@
     #airBtn.on{background:rgba(2,119,189,.9);border-color:#0277bd}
     #staBtn.on{background:rgba(198,40,40,.85);border-color:#c62828}
     @media(min-width:820px){.layers{top:110px}}
-    .leaflet-bottom.leaflet-left{bottom:calc(var(--tl-h) + 4px)}
+    .leaflet-bottom.leaflet-left{bottom:calc(var(--tl-h) + 64px)}
     .legend{background:rgba(0,0,0,.6);border-radius:8px;padding:6px 9px;font-size:11px;line-height:1.7;color:#eee}
     .aclabel{background:rgba(2,119,189,.9)!important;border:none!important;color:#fff!important;font-weight:700;font-size:10.5px;padding:2px 6px!important;border-radius:6px!important;box-shadow:0 1px 4px #000}
     .aclabel:before{display:none!important}
@@ -197,8 +197,15 @@ async function boot(){
       fetch('/api/meteosat').then(r=>r.json()).catch(()=>null)
     ]);
     state.data=data; state.wind=wind; state.meteo=meteo;
-    // Unified timeline: 5 days of active hotspots (past) then 7 days of forecast.
-    const pf=(past.frames||[]).map(f=>({kind:'past',...f}));
+    // wind lookup by hour-timestamp (covers past 5 d + forecast 8 d)
+    state.windIdx={};
+    if(wind&&wind.times) wind.times.forEach((t,k)=>{state.windIdx[t.slice(0,13)]=k;});
+    // compact fire points + window
+    state.firePts=past.points||[]; state.winH=past.window_h||24;
+    // Unified timeline: 5 days of past hours then 7 days of forecast.
+    const startMs=Date.parse(past.start);
+    const pf=[]; for(let k=0;k<past.n_hours;k++)
+      pf.push({kind:'past',hIdx:k,timestamp:new Date(startMs+k*3600e3).toISOString().slice(0,16)+'Z'});
     const sf=(sim.frames||[]).map(f=>({kind:'sim',...f}));
     state.frames=pf.concat(sf);
     state.nowIdx=Math.max(pf.length-1,0);   // last past frame = "now"
@@ -271,9 +278,9 @@ function render(i){
 function goLive(){ if(state.playing) stop(); render(state.nowIdx); }
 
 function windColor(s){ return s<5?'#4caf50':s<10?'#ffd54f':s<15?'#ff9800':'#ff3d00'; }
-function drawWind(i){
-  const w=state.wind; if(!w||!w.speed) return;
-  const k=Math.min(i, w.speed.length-1); if(k<0) return;
+function drawWindAt(ts){
+  const w=state.wind; if(!w||!w.speed||!ts) return;
+  const k=state.windIdx[ts.slice(0,13)]; if(k==null) return;
   for(let a=0;a<w.grid_lats.length;a++){
     for(let b=0;b<w.grid_lons.length;b++){
       const s=w.speed[k][a][b], dir=w.dir[k][a][b];
@@ -286,13 +293,23 @@ function drawWind(i){
   }
 }
 
+// age-based style: a hotspot is born bright hot, then dims to dark ember red.
+function ageStyle(age,frp){
+  const base=3+Math.min((frp||0)/18,6);
+  if(age<2)  return {col:'#ffee58',op:.95,r:base+2};   // naissance : jaune vif
+  if(age<6)  return {col:'#ffab00',op:.9, r:base+1};   // pleine activité
+  if(age<12) return {col:'#ff5722',op:.8, r:base};     // feu établi
+  if(age<18) return {col:'#d32f2f',op:.55,r:base-1};   // décline
+  return       {col:'#7f0000',op:.32,r:Math.max(base-2,2)}; // braise mourante
+}
 function renderPastFrame(f,i){
-  (f.points||[]).forEach(p=>{
-    const frp=p.frp||0;
-    const r=3+Math.min(frp/18,6);
-    const col=frp>50?'#d50000':frp>15?'#ff3d00':'#ff6d00';
-    L.circleMarker([p.lat,p.lon],{radius:r,color:col,weight:.5,
-      fillColor:col,fillOpacity:.8}).addTo(firePts);
+  const win=state.winH, h=f.hIdx;
+  (state.firePts||[]).forEach(p=>{
+    const age=h-p.h;
+    if(age<0||age>=win) return;
+    const s=ageStyle(age,p.frp);
+    L.circleMarker([p.lat,p.lon],{radius:s.r,color:s.col,weight:.5,
+      fillColor:s.col,fillOpacity:s.op}).addTo(firePts);
   });
   // geostationary fire pixels (Meteosat, ~10 min) — only near "now"
   if(i>=state.nowIdx-2){
@@ -302,18 +319,24 @@ function renderPastFrame(f,i){
         .bindTooltip('Feu Meteosat (~10 min)').addTo(firePts);
     });
   }
+  drawWindAt(f.timestamp);
   const live=(i===state.nowIdx);
-  $('tlTime').textContent=(live?'● MAINTENANT · ':'')+fmtT(f.timestamp);
-  $('tlInfo').textContent=`${f.active} foyer(s) actif(s)`;
+  const n=(state.firePts||[]).reduce((a,p)=>{const g=h-p.h;return a+(g>=0&&g<win?1:0);},0);
+  $('tlTime').textContent=(live?'● DIRECT · ':'⏪ ')+fmtT(f.timestamp);
+  $('tlTime').style.color=live?'#ff5252':'var(--fire2)';
+  $('tlInfo').textContent=`${n} foyer(s) actif(s)`;
 }
 
 function renderSimFrame(f){
+  // simulation = BLEU : hypothèse, pas du feu réel
   (f.polygons||[]).forEach(poly=>{
-    L.polygon(poly,{color:'#ff6d00',weight:1.5,fillColor:'#ff3d00',fillOpacity:.32}).addTo(simLayer);
+    L.polygon(poly,{color:'#4fc3f7',weight:2,dashArray:'6,4',
+      fillColor:'#0288d1',fillOpacity:.30}).addTo(simLayer);
   });
-  drawWind(f.hour!=null?f.hour:0);
+  drawWindAt(f.timestamp);
   const j=Math.floor((f.hour||0)/24);
   $('tlTime').textContent=`🔮 ${fmtT(f.timestamp)}`;
+  $('tlTime').style.color='#4fc3f7';
   const day=j>0?`J+${j} · `:'prévision · ';
   const tmp=(f.temp_c!=null)?` · ${f.temp_c}°C`:'';
   $('tlInfo').textContent=`${day}${(f.area_ha||0).toLocaleString('fr-FR')} ha · vent ${f.wind_speed_ms} m/s · ${f.humidity_pct}% hum.${tmp}`;
@@ -338,7 +361,7 @@ function toggleVeg(){
   const btn=$('vegBtn');
   if(vegOverlay){ map.removeLayer(vegOverlay); vegOverlay=null; btn.classList.remove('on'); return; }
   // SIM_BBOX = lon[-1.5,-0.5] lat[44.5,45.2]
-  vegOverlay=L.imageOverlay('/api/vegetation.png',[[44.5,-1.5],[45.2,-0.5]],
+  vegOverlay=overlayWithRetry('/api/vegetation.png',[[44.5,-1.5],[45.2,-0.5]],
     {opacity:.6,interactive:false}).addTo(map);
   btn.classList.add('on');
 }
@@ -363,6 +386,12 @@ function toggleAirQ(){
   };
   add(); btn.classList.add('on');
   airqTimer=setInterval(add, 1800*1000);
+}
+// retry image overlays that failed while the backend was still warming up
+function overlayWithRetry(url,bounds,opts){
+  const ov=L.imageOverlay(url+'?t='+Date.now(),bounds,opts);
+  ov.on('error',()=>setTimeout(()=>{ if(map.hasLayer(ov)) ov.setUrl(url+'?t='+Date.now()); },8000));
+  return ov;
 }
 async function loadLayer(name,fit){
   const L0=LYR[name];
@@ -427,8 +456,9 @@ function log(){}  // placeholder (no-op narrator)
 
 const legend=L.control({position:'bottomleft'});
 legend.onAdd=function(){const d=L.DomUtil.create('div','legend');
-  d.innerHTML='<i style="background:#ff3d00"></i>Foyer / zone brûlée<br>'+
-    '<span style="color:#ffd54f">➤</span> vent (flèche = sens, couleur = force)';
+  d.innerHTML='<i style="background:#ffee58"></i>Foyer récent → <i style="background:#7f0000"></i>en extinction<br>'+
+    '<i style="background:#0288d1;border:1px dashed #4fc3f7"></i>Prévision (simulation)<br>'+
+    '<span style="color:#ffd54f">➤</span> vent (sens + force)';
   return d;};
 legend.addTo(map);
 

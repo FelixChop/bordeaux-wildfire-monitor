@@ -165,7 +165,7 @@ SIM_BBOX = (-1.5, 44.5, -0.5, 45.2)  # lon_min, lat_min, lon_max, lat_max
 _veg_cache = {'date': None, 'fuel': None, 'bbox': SIM_BBOX}
 
 
-def fetch_wind_field(n=6, hours=192):
+def fetch_wind_field(n=6, hours=312):  # 5 past days + 8 forecast days
     """Grid of Open-Meteo wind+humidity forecasts for a spatial wind field."""
     lon0, lat0, lon1, lat1 = SIM_BBOX
     grid_lats = list(np.linspace(lat0, lat1, n))
@@ -180,7 +180,7 @@ def fetch_wind_field(n=6, hours=192):
             'latitude': ','.join(map(str, lats_q)),
             'longitude': ','.join(map(str, lons_q)),
             'hourly': 'wind_speed_10m,wind_direction_10m,relative_humidity_2m,temperature_2m',
-            'forecast_days': 8, 'timezone': 'UTC',
+            'past_days': 5, 'forecast_days': 8, 'timezone': 'UTC',
         }, timeout=20)
         if r.status_code != 200:
             return None
@@ -453,36 +453,34 @@ def _parse_ts(ts):
 
 @app.route('/api/fire-history')
 def api_fire_history():
-    """Active hotspots on a continuous hourly timeline (sliding window)."""
+    """Compact hotspot timeline: each detection once with its hour offset.
+
+    The client renders any hour by filtering detections whose age is within
+    the active window, and fades them with age (fresh = bright, dying = dark
+    red). Much smaller than per-frame point lists.
+    """
     if not latest_data:
         return jsonify({'error': 'No data available'}), 503
     hotspots = latest_data['firms'].get('hotspots', [])
+    now = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+    start = now - timedelta(days=5)
     pts = []
     for h in hotspots:
         dt = _parse_ts(h.get('timestamp'))
-        if dt:
-            pts.append((dt, h['lat'], h['lon'], h.get('frp', 0.0)))
-    pts.sort(key=lambda p: p[0])
-
-    now = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
-    start = now - timedelta(days=5)
-    win = timedelta(hours=ACTIVE_WINDOW_H)
-    frames = []
-    t = start
-    while t <= now:
-        active = [{'lat': la, 'lon': lo, 'frp': frp}
-                  for (dt, la, lo, frp) in pts if t - win < dt <= t]
-        frames.append({
-            'timestamp': t.strftime('%Y-%m-%dT%H:00Z'),
-            'active': len(active),
-            'points': active,
-        })
-        t += timedelta(hours=1)
+        if not dt:
+            continue
+        off = (dt - start).total_seconds() / 3600.0
+        if off <= -ACTIVE_WINDOW_H:
+            continue  # never visible on the timeline
+        pts.append({'lat': h['lat'], 'lon': h['lon'],
+                    'frp': round(h.get('frp', 0.0), 1), 'h': round(off, 1)})
     return jsonify({
         'source': latest_data['firms'].get('source'),
+        'start': start.strftime('%Y-%m-%dT%H:00Z'),
         'now': now.strftime('%Y-%m-%dT%H:00Z'),
-        'n_frames': len(frames),
-        'frames': frames,
+        'n_hours': int((now - start).total_seconds() // 3600) + 1,
+        'window_h': ACTIVE_WINDOW_H,
+        'points': pts,
     })
 
 
@@ -540,6 +538,8 @@ def api_vegetation_png():
     """Fuel map as a translucent PNG overlay (green=forest, blue=water)."""
     fuel = _veg_cache.get('fuel')
     if fuel is None:
+        fuel = fetch_vegetation()   # lazy load if the boot fetch failed
+    if fuel is None:
         return jsonify({'error': 'No vegetation'}), 503
     import matplotlib.image as mpimg
     h, w = fuel.shape
@@ -560,18 +560,15 @@ def api_vegetation_png():
 
 @app.route('/api/windfield')
 def api_windfield():
-    """Spatial wind field (grid of arrows) for the current & forecast hours."""
+    """Spatial wind field (grid of arrows): past 5 days AND forecast hours."""
     if not _wind_field:
         return jsonify({'error': 'No wind field'}), 503
-    now_key = datetime.utcnow().strftime('%Y-%m-%dT%H:00')
-    times = _wind_field['times']
-    idx = [k for k, t in enumerate(times) if (t or '') >= now_key] or list(range(len(times)))
     return jsonify({
         'grid_lats': _wind_field['grid_lats'],
         'grid_lons': _wind_field['grid_lons'],
-        'times': [times[k] for k in idx],
-        'speed': np.asarray(_wind_field['speed'])[idx].round(1).tolist(),
-        'dir': np.asarray(_wind_field['dir'])[idx].round(0).tolist(),
+        'times': _wind_field['times'],
+        'speed': np.asarray(_wind_field['speed']).round(1).tolist(),
+        'dir': np.asarray(_wind_field['dir']).round(0).tolist(),
     })
 
 
