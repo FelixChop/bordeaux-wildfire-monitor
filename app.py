@@ -159,7 +159,7 @@ def fetch_extended_wind_forecast():
     }
 
 # Simulation domain (also used for the vegetation raster).
-SIM_BBOX = (-1.5, 44.5, -0.5, 45.2)  # lon_min, lat_min, lon_max, lat_max
+SIM_BBOX = (-1.8, 44.2, -0.2, 45.6)  # lon_min, lat_min, lon_max, lat_max (large : couvre écrans hauts)
 
 # Vegetation fuel map cached across refreshes (numpy, not JSON-serialisable).
 _veg_cache = {'date': None, 'fuel': None, 'bbox': SIM_BBOX}
@@ -231,7 +231,7 @@ def fetch_vegetation():
             url = ("https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
                    "?SERVICE=WMS&REQUEST=GetMap&VERSION=1.3.0"
                    "&LAYERS=MODIS_Terra_NDVI_8Day&STYLES=&CRS=EPSG:4326"
-                   f"&BBOX={lat0},{lon0},{lat1},{lon1}&WIDTH=360&HEIGHT=280"
+                   f"&BBOX={lat0},{lon0},{lat1},{lon1}&WIDTH=420&HEIGHT=370"
                    f"&FORMAT=image/png&TIME={d2}")
             r = requests.get(url, timeout=25)
             if r.status_code == 200:
@@ -1053,8 +1053,8 @@ def api_air_quality_png():
     interpolation + gaussian smoothing for continuous contours.
     """
     def prod():
-        n_lat, n_lon = 8, 10
-        lat0, lat1, lon0, lon1 = 44.45, 45.20, -1.45, -0.35
+        n_lat, n_lon = 9, 10
+        lat0, lat1, lon0, lon1 = 44.20, 45.55, -1.75, -0.25
         lats = np.linspace(lat0, lat1, n_lat)
         lons = np.linspace(lon0, lon1, n_lon)
         laq, loq = [], []
@@ -1120,8 +1120,8 @@ def api_air_field():
     adds the smoke plume of the simulated fire on top.
     """
     def prod():
-        n_lat, n_lon = 8, 10
-        lat0, lat1, lon0, lon1 = 44.45, 45.20, -1.45, -0.35
+        n_lat, n_lon = 9, 10
+        lat0, lat1, lon0, lon1 = 44.20, 45.55, -1.75, -0.25
         lats = np.linspace(lat0, lat1, n_lat)
         lons = np.linspace(lon0, lon1, n_lon)
         laq, loq = [], []

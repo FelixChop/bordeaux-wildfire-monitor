@@ -531,8 +531,8 @@ function togglePanel(){ $('panel').classList.toggle('collapsed'); }
 // vegetation base layer: ALWAYS on (no toggle) — burned scars darken it
 let vegOverlay=null;
 function addVeg(){
-  // SIM_BBOX = lon[-1.5,-0.5] lat[44.5,45.2]
-  vegOverlay=overlayWithRetry('/api/vegetation.png',[[44.5,-1.5],[45.2,-0.5]],
+  // SIM_BBOX élargi : lon[-1.8,-0.2] lat[44.2,45.6]
+  vegOverlay=overlayWithRetry('/api/vegetation.png',[[44.2,-1.8],[45.6,-0.2]],
     {opacity:.6,interactive:false}).addTo(map);
 }
 
@@ -564,7 +564,7 @@ function aqiRGB(v){ // même échelle que le backend (0..120)
 function addAirOverlay(){
   const af=state.airField;
   if(!af){ // fallback : image statique
-    airOverlay=overlayWithRetry('/api/air-quality.png',[[44.45,-1.45],[45.20,-0.35]],
+    airOverlay=overlayWithRetry('/api/air-quality.png',[[44.2,-1.75],[45.55,-0.25]],
       {opacity:.8,interactive:false}).addTo(map);
     return;
   }

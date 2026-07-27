@@ -389,7 +389,7 @@ def simulate_ensemble(hotspots, wind_records, wind_field=None, veg_fuel=None,
 
 
 # Smoke transport grid (matches the air-quality overlay bbox)
-_SMK_BBOX = (44.45, -1.45, 45.20, -0.35)   # lat0, lon0, lat1, lon1
+_SMK_BBOX = (44.20, -1.75, 45.55, -0.25)   # lat0, lon0, lat1, lon1
 _SMK_NR, _SMK_NC = 32, 40
 
 
