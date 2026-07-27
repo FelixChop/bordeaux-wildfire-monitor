@@ -218,15 +218,22 @@ def fetch_vegetation():
     day = (datetime.utcnow() - timedelta(days=16)).strftime('%Y-%m-%d')
     if _veg_cache['date'] == day and _veg_cache['fuel'] is not None:
         return _veg_cache['fuel']
+    # keep serving the previous fuel map if today's fetch fails (GIBS 504s)
+    stale = _veg_cache.get('fuel')
     try:
-        url = ("https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
-               "?SERVICE=WMS&REQUEST=GetMap&VERSION=1.3.0"
-               "&LAYERS=MODIS_Terra_NDVI_8Day&STYLES=&CRS=EPSG:4326"
-               f"&BBOX={lat0},{lon0},{lat1},{lon1}&WIDTH=360&HEIGHT=280"
-               f"&FORMAT=image/png&TIME={day}")
-        r = requests.get(url, timeout=25)
-        if r.status_code != 200:
-            return None
+        r = None
+        for back in (16, 24, 32):  # try older 8-day composites if GIBS chokes
+            d2 = (datetime.utcnow() - timedelta(days=back)).strftime('%Y-%m-%d')
+            url = ("https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
+                   "?SERVICE=WMS&REQUEST=GetMap&VERSION=1.3.0"
+                   "&LAYERS=MODIS_Terra_NDVI_8Day&STYLES=&CRS=EPSG:4326"
+                   f"&BBOX={lat0},{lon0},{lat1},{lon1}&WIDTH=360&HEIGHT=280"
+                   f"&FORMAT=image/png&TIME={d2}")
+            r = requests.get(url, timeout=25)
+            if r.status_code == 200:
+                break
+        if r is None or r.status_code != 200:
+            return stale
         import matplotlib.image as mpimg
         img = mpimg.imread(io.BytesIO(r.content), format='png')  # HxWx4, 0..1
         rgb = (img[:, :, :3] * 255.0)
@@ -243,7 +250,7 @@ def fetch_vegetation():
         return fuel
     except Exception as e:
         print(f"Vegetation fetch error: {e}")
-        return None
+        return stale
 
 
 _wind_field = None

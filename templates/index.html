@@ -273,7 +273,7 @@ function render(i){
   firePts.clearLayers(); simLayer.clearLayers(); windLayer.clearLayers();
   const f=state.frames[i]; if(!f){ $('tlTime').textContent='—'; return; }
   $('liveBtn').classList.toggle('on', i===state.nowIdx);
-  if(f.kind==='past') renderPastFrame(f,i); else renderSimFrame(f);
+  if(f.kind==='past') renderPastFrame(f,i); else renderSimFrame(f,i);
 }
 function goLive(){ if(state.playing) stop(); render(state.nowIdx); }
 
@@ -327,11 +327,35 @@ function renderPastFrame(f,i){
   $('tlInfo').textContent=`${n} foyer(s) actif(s)`;
 }
 
-function renderSimFrame(f){
-  // simulation = BLEU : hypothèse, pas du feu réel
-  (f.polygons||[]).forEach(poly=>{
-    L.polygon(poly,{color:'#4fc3f7',weight:2,dashArray:'6,4',
-      fillColor:'#0288d1',fillOpacity:.30}).addTo(simLayer);
+function renderSimFrame(f,i){
+  // Real hotspots keep dying out as simulated time advances (age keeps running).
+  const effH=state.nowIdx+(f.hour||0);
+  (state.firePts||[]).forEach(p=>{
+    const age=effH-p.h;
+    if(age<0||age>=state.winH) return;
+    const s=ageStyle(age,p.frp);
+    L.circleMarker([p.lat,p.lon],{radius:s.r,color:s.col,weight:.5,
+      fillColor:s.col,fillOpacity:s.op*.9}).addTo(firePts);
+  });
+  // Simulated burn, mathematically stacked: the model's earlier isochrones
+  // (older burn) darken the core, the newest ring is the bright young front.
+  const simStart=state.nowIdx+1;
+  const pos=i-simStart;                       // index among sim frames
+  const layers=[
+    {off:0, fill:'#29b6f6', op:.38, stroke:true},   // front jeune (maintenant simulé)
+    {off:2, fill:'#0288d1', op:.42},                // ~6 h plus tôt
+    {off:5, fill:'#01579b', op:.48},                // ~15 h
+    {off:10,fill:'#003c8f', op:.52},                // ~30 h
+    {off:20,fill:'#0d2b57', op:.58},                // ~60 h : brûlé ancien
+  ];
+  layers.forEach(ly=>{
+    const g=state.frames[simStart+pos-ly.off];
+    if(!g||g.kind!=='sim') return;
+    (g.polygons||[]).forEach(poly=>{
+      L.polygon(poly,{color:ly.stroke?'#80deea':'transparent',
+        weight:ly.stroke?2:0,dashArray:ly.stroke?'6,4':null,
+        fillColor:ly.fill,fillOpacity:ly.op}).addTo(simLayer);
+    });
   });
   drawWindAt(f.timestamp);
   const j=Math.floor((f.hour||0)/24);
