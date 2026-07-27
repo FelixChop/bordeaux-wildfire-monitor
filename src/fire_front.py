@@ -129,6 +129,10 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
     nrows, ncols = dom['nrows'], dom['ncols']
     cell_lat_m = dom['cell_lat_m']
     fuel_grid = dom['fuel_grid']
+    if p.get('fuel_mult') is not None:
+        # frozen heterogeneity: fuel corridors & jackpots -> fingering fronts
+        fuel_grid = fuel_grid * p['fuel_mult']
+    P_GROW = 0.7   # stochastic front advance (per-attempt success)
 
     have_field = (wind_field is not None and RegularGridInterpolator is not None
                   and len(wind_field.get('times', [])) > 0)
@@ -201,6 +205,8 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
             ros = ros * (1.0 - eff)
         residual += ros * 60.0
 
+        if rng is not None:
+            ros = ros / P_GROW   # compensate the stochastic advance in mean speed
         b0 = burned.copy()
         for _ in range(8):
             ready = residual >= cell_lat_m
@@ -213,27 +219,31 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
                 if not src.any():
                     continue
                 grew |= _shift(src, di, dj) & ~burned & (fuel_grid > 0)
+            if rng is not None:
+                # stochastic front: each advance succeeds with P_GROW ->
+                # rough, fingering fire edges instead of smooth rings
+                grew &= rng.random(grew.shape) < P_GROW
             burned |= grew
             residual = np.where(ready, residual - cell_lat_m, residual)
             if not grew.any():
                 break
         ign[burned & ~b0] = h
 
-        # PyroCumulonimbus spotting: the convective column lofts embers that
-        # ignite NEW fires kilometres AHEAD of the front, downwind.
-        rate_h = float(spot_h[h]) if spot_h is not None else spot_rate
-        if rate_h > 0 and rng is not None:
-            n_spots = rng.poisson(rate_h)
-            if n_spots:
-                recent = burned & (ign >= h - 3)
-                if h < 3:
-                    recent = recent | dom['seed_mask']
-                fr_r, fr_c = np.where(recent)
-                if len(fr_r):
-                    for _ in range(int(n_spots)):
+        # Ember spotting: routine short throws (0.3-1.5 km, breakouts ahead of
+        # the front) + pyroCb long throws (2-8 km) when a fire storm is active.
+        pyro_rate = float(spot_h[h]) if spot_h is not None else spot_rate
+        if rng is not None:
+            recent = burned & (ign >= h - 3)
+            if h < 3:
+                recent = recent | dom['seed_mask']
+            fr_r, fr_c = np.where(recent)
+            if len(fr_r):
+                for rate, dmin, dmax in ((pyro_rate, 2000, 8000), (0.35, 300, 1500)):
+                    if rate <= 0:
+                        continue
+                    for _ in range(int(rng.poisson(rate))):
                         i = int(rng.integers(len(fr_r)))
-                        # 2–8 km downwind, ±20° scatter
-                        dist_m = float(rng.uniform(2000, 8000))
+                        dist_m = float(rng.uniform(dmin, dmax))
                         ang = np.radians(float(rng.normal(0, 20)))
                         ex, ny = pe_u[fr_r[i], fr_c[i]], pn_u[fr_r[i], fr_c[i]]
                         ca, sa = np.cos(ang), np.sin(ang)
@@ -345,12 +355,18 @@ def simulate_ensemble(hotspots, wind_records, wind_field=None, veg_fuel=None,
     dom = _prepare_domain(hotspots, veg_fuel, veg_bbox)
     if dom is None:
         return None
+    from scipy.ndimage import gaussian_filter as _gf
     rng = np.random.default_rng(rng_seed)
     igns, pyro_flags, meta = [], [], None
 
     for k in range(n_runs):
         pert = {'rng': rng,
                 'supp_mult': float(np.exp(rng.normal(0, 0.15)))}
+        # frozen fuel heterogeneity (per run): corridors, jackpots, firebreak-
+        # like gaps -> fronts grow fingers instead of smooth rings
+        noise = _gf(rng.normal(0, 1, (dom['nrows'], dom['ncols'])), sigma=2.5)
+        noise = noise / max(noise.std(), 1e-9)
+        pert['fuel_mult'] = np.clip(np.exp(0.45 * noise), 0.3, 2.2)
         # wind uncertainty grows with lead time (random walk, ° and ×)
         dn = np.zeros(max_hours)
         sm = np.zeros(max_hours)
@@ -462,53 +478,63 @@ def _smoke_series(store, ig_sel, emit_hours):
     return out
 
 
-_VIEW_THR = {'ref': 0.5, 'opt': 0.85, 'pess': 0.2, 'pyro': 0.5}
-
-
 def derive_view(store, view='ref', emit_every=3):
-    """Cheap projection of the stored ensemble into a map view."""
+    """Project the ensemble onto a REPRESENTATIVE MEMBER run.
+
+    The >=50 % probability footprint averaged all the chaos away into smooth
+    concentric blobs; real fires finger and break out. Each view now shows one
+    ACTUAL ensemble member, chosen by final burned area: ref = median run,
+    opt = p10 run, pess = p90 run, pyro = median pyroCb run, 'mK' = member K
+    (tirage individuel). Area labels keep the full-ensemble p10-p90 spread.
+    """
     if store is None:
         return {'n_frames': 0, 'frames': [], 'n_seeds': 0, 'n_runs': 0}
     igns, dom, meta = store['igns'], store['dom'], store['meta']
     n_hours = store['n_hours']
-    thr = _VIEW_THR.get(view, 0.5)
-    sel = np.ones(len(igns), dtype=bool)
-    if view == 'pyro' and store['pyro'].any():
-        sel = store['pyro']
-    ig = igns[sel]
     seed = dom['seed_mask']
+    n = len(igns)
+
+    finals = (seed[None, :, :] | ((igns >= 0) & (igns < n_hours))).sum(axis=(1, 2))
+    order = np.argsort(finals)
+    if view.startswith('m') and view[1:].isdigit():
+        member = min(int(view[1:]), n - 1)
+    elif view == 'pyro' and store['pyro'].any():
+        cand = [i for i in order.tolist() if store['pyro'][i]]
+        member = cand[len(cand) // 2]
+    else:
+        q = {'ref': 0.5, 'opt': 0.10, 'pess': 0.90}.get(view, 0.5)
+        member = int(order[min(int(round(q * (n - 1))), n - 1)])
+    ig_m = igns[member]
 
     emit_hours = sorted(set(list(range(0, n_hours, emit_every)) + [n_hours - 1]))
-    smoke = _smoke_series(store, ig, set(emit_hours))
+    smoke = _smoke_series(store, igns[member:member + 1], set(emit_hours))
     frames = []
-    prev = np.zeros_like(seed)
+    prev_h = -1
     for H in emit_hours:
-        burned_runs = seed[None, :, :] | ((ig >= 0) & (ig <= H))
-        prob = burned_runs.mean(axis=0)
-        foot = prob >= thr
+        burned_runs = seed[None, :, :] | ((igns >= 0) & (igns <= H))
         areas = burned_runs.sum(axis=(1, 2)) * dom['cell_area_ha']
-        newly = foot & ~prev & ~seed
+        area_m = float((seed | ((ig_m >= 0) & (ig_m <= H))).sum() * dom['cell_area_ha'])
+        newly = (ig_m > prev_h) & (ig_m <= H) & ~seed
         nr, nc = np.where(newly)
         new_pts = [[round(float(dom['lat_axis'][r]), 4),
-                    round(float(dom['lon_axis'][c]), 4), int(H)]
+                    round(float(dom['lon_axis'][c]), 4), int(ig_m[r, c])]
                    for r, c in zip(nr.tolist(), nc.tolist()) if (r + c) % 2 == 0]
-        prev = foot
+        prev_h = H
         mm = meta[H] if meta and H < len(meta) else {}
-        # headline area matches the view: opt = p10, pess = p90, sinon médiane
-        headline = {'opt': np.percentile(areas, 10),
-                    'pess': np.percentile(areas, 90)}.get(view, np.median(areas))
         frames.append({
             'hour': int(H), 'timestamp': mm.get('timestamp'),
             'wind_speed_ms': mm.get('wind', 0), 'humidity_pct': mm.get('rh', 0),
             'temp_c': mm.get('temp'),
-            'area_ha': int(headline),
+            'area_ha': int(area_m),
             'area_p10': int(np.percentile(areas, 10)),
             'area_p90': int(np.percentile(areas, 90)),
             'new_points': new_pts,
             'smoke': smoke.get(H),
         })
     return {'n_frames': len(frames), 'n_seeds': dom['n_seeds'],
-            'n_runs': int(sel.sum()), 'view': view,
+            'n_runs': n, 'view': view, 'member': int(member),
+            'member_pyro': bool(store['pyro'][member]),
             'pyro_runs': int(store['pyro'].sum()),
             'smoke_bbox': list(_SMK_BBOX), 'smoke_shape': [_SMK_NR, _SMK_NC],
             'frames': frames}
+

@@ -33,6 +33,29 @@ UPDATE_INTERVAL = 3600  # Refresh every hour (seconds)
 latest_data = None
 last_update = None
 
+# Warm-cache on disk: served instantly after a restart while the background
+# thread refreshes — visitors never wait for a recompute.
+WARM_DIR = Path(os.getenv('WARM_DIR', '/data/warm'))
+
+
+def _warm_save(name, obj):
+    try:
+        WARM_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = WARM_DIR / (name + '.tmp')
+        with open(tmp, 'w') as f:
+            json.dump(obj, f)
+        tmp.rename(WARM_DIR / name)
+    except OSError:
+        pass
+
+
+def _warm_load(name):
+    try:
+        with open(WARM_DIR / name) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
 # Multiple NRT products => more satellite passes => fresher & denser coverage.
 _FIRMS_PRODUCTS = ['VIIRS_SNPP_NRT', 'VIIRS_NOAA20_NRT', 'VIIRS_NOAA21_NRT', 'MODIS_NRT']
 
@@ -327,6 +350,8 @@ def update_data():
             }
 
             last_update = datetime.utcnow()
+            _warm_save('latest.json', {'latest': latest_data,
+                                       'last_update': last_update.isoformat()})
             print(f"✓ Data updated. Fire distance: {dist_km:.1f} km")
 
             try:
@@ -570,11 +595,21 @@ def compute_ensemble():
                     f['timestamp'] = ts + 'Z'
             views[v] = d
         _ens_store['views'] = views
+        _ens_store['store'] = store   # gardé pour dériver les tirages 'mK'
         _ens_store['ver'] = ver
+        _warm_save('views.json', {'ver': ver, 'views': views})
         print(f"✓ Ensemble {ver}: {len(views)} vues prêtes")
     finally:
         _sim_lock.release()
     return _ens_store['views']
+
+
+def _normalize_ts(d):
+    for f in d.get('frames', []):
+        ts = f.get('timestamp')
+        if ts and not ts.endswith('Z'):
+            f['timestamp'] = ts + 'Z'
+    return d
 
 
 @app.route('/api/scenario')
@@ -584,7 +619,14 @@ def api_scenario():
         return jsonify({'error': 'No data available'}), 503
     views = _ens_store['views'] or compute_ensemble()
     view = request.args.get('view', 'ref')
-    data = (views or {}).get(view if view in _VIEWS else 'ref')
+    if not (view in _VIEWS or (view.startswith('m') and view[1:].isdigit())):
+        view = 'ref'
+    data = (views or {}).get(view)
+    if data is None and views is not None and _ens_store.get('store') is not None:
+        # tirage individuel 'mK' : dérivé à la demande puis mis en cache
+        from src.fire_front import derive_view
+        data = _normalize_ts(derive_view(_ens_store['store'], view))
+        views[view] = data
     return jsonify(data if data else {'error': 'Computing'}), (200 if data else 503)
 
 
@@ -1186,6 +1228,27 @@ def api_air_grid():
     return jsonify(_cached('airgrid', 1800, prod) or {'points': []})
 
 
+@app.route('/robots.txt')
+def robots():
+    return Response("User-agent: *\nAllow: /\nSitemap: https://incendiebordeaux.fr/sitemap.xml\n",
+                    mimetype='text/plain')
+
+
+@app.route('/sitemap.xml')
+def sitemap():
+    xml = ('<?xml version="1.0" encoding="UTF-8"?>'
+           '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+           '<url><loc>https://incendiebordeaux.fr/</loc><changefreq>hourly</changefreq></url>'
+           '<url><loc>https://incendiebordeaux.fr/methodologie</loc><changefreq>monthly</changefreq></url>'
+           '</urlset>')
+    return Response(xml, mimetype='application/xml')
+
+
+@app.route('/methodologie')
+def methodologie():
+    return render_template('methodologie.html')
+
+
 @app.route('/api/communes')
 def api_communes():
     """Simplified commune boundaries (geo.api.gouv.fr) within the view."""
@@ -1246,6 +1309,23 @@ def api_aircraft_history():
         pass
     return jsonify({'positions': pos})
 
+
+# Boot from the warm disk cache: serve slightly-stale data immediately after a
+# restart instead of showing a loading screen for the recompute duration.
+_w = _warm_load('latest.json')
+if _w and _w.get('latest'):
+    latest_data = _w['latest']
+    try:
+        last_update = datetime.fromisoformat(_w['last_update'])
+    except (KeyError, ValueError):
+        last_update = datetime.utcnow()
+    print("✓ Warm cache: données servies depuis le disque")
+_w = _warm_load('views.json')
+if _w and _w.get('views'):
+    _ens_store['views'] = _w['views']
+    _ens_store['ver'] = _w.get('ver')   # même heure => pas de recalcul inutile
+    print("✓ Warm cache: ensemble servi depuis le disque")
+del _w
 
 # Start background data fetch thread at import time so it also runs under
 # gunicorn (which never executes the __main__ block). update_data() does its

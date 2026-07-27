@@ -3,7 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-  <title>🔥 Bordeaux — Risque Feu de Forêt</title>
+  <title>Incendie Bordeaux — carte temps réel du feu de forêt en Gironde et simulation 7 jours</title>
+  <meta name="description" content="Carte en direct de l'incendie près de Bordeaux : foyers détectés par satellite (NASA FIRMS, Meteosat ~10 min), qualité de l'air, vent, et simulation Monte Carlo de la propagation à 7 jours (vent, sécheresse, végétation, pompiers, pyrocumulonimbus).">
+  <link rel="canonical" href="https://incendiebordeaux.fr/">
+  <meta property="og:title" content="Incendie Bordeaux — carte temps réel & simulation">
+  <meta property="og:description" content="Foyers satellites en direct, qualité de l'air, et prévision de propagation à 7 jours par ensemble Monte Carlo.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://incendiebordeaux.fr/">
+  <meta property="og:locale" content="fr_FR">
+  <meta name="twitter:card" content="summary">
+  <meta name="theme-color" content="#12100f">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
   <style>
     :root{
@@ -95,9 +104,21 @@
     #staBtn.on{background:rgba(198,40,40,.85);border-color:#c62828}
     @media(min-width:820px){.layers{top:110px}}
     .leaflet-bottom.leaflet-left{bottom:calc(var(--tl-h) + 64px)}
-    .dash{position:fixed;z-index:1200;right:8px;top:calc(env(safe-area-inset-top) + 150px);
-      background:rgba(20,16,14,.95);border:1px solid var(--line);border-radius:14px;
-      padding:10px 12px;width:238px;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+    /* ---- menu burger plein écran ---- */
+    .menu{position:fixed;inset:0;z-index:1700;background:rgba(14,11,10,.98);
+      display:flex;flex-direction:column}
+    .menu-head{display:flex;justify-content:space-between;align-items:center;
+      padding:calc(env(safe-area-inset-top) + 14px) 18px 12px;border-bottom:1px solid var(--line);
+      font-size:16px;font-weight:800;color:var(--fire2)}
+    .menu-head b{cursor:pointer;color:var(--muted);font-size:20px;padding:2px 8px}
+    .menu-body{overflow-y:auto;padding:6px 16px calc(env(safe-area-inset-bottom) + 30px);flex:1}
+    .menu-body h3{font-size:13px;color:var(--fire2);margin:20px 0 10px;letter-spacing:.4px}
+    .mh-sub{font-weight:400;color:var(--muted);font-size:11px}
+    .menu-links{display:flex;flex-direction:column;gap:10px}
+    .menu-links a{color:#4fc3f7;font-size:13.5px;cursor:pointer;text-decoration:none}
+    .menu-body .grid{padding:0}
+    .menu-body .src{padding:8px 0 0}
+    .dash{display:none}
     .dash-title{font-size:12px;font-weight:700;color:var(--fire2);margin-bottom:8px}
     .dash-row{display:flex;align-items:center;justify-content:space-between;margin:6px 0}
     .dash-row>span{font-size:11.5px;color:var(--txt)}
@@ -157,12 +178,40 @@
 
   <div id="map"></div>
   <div class="simveil"></div>
-  <div class="simbadge">🔮 SIMULATION FUTURE</div>
 
 
   <div class="layers">
-    <div class="lyr" id="dashBtn" onclick="toggleDash()">🎛️ Scénario</div>
-    <div class="lyr" id="dataBtn" onclick="toggleData()">📊 Données</div>
+    <div class="lyr" id="burgerBtn" onclick="toggleMenu()" style="font-size:17px;padding:5px 13px">☰</div>
+  </div>
+
+  <div class="menu" id="menu" style="display:none">
+    <div class="menu-head"><span>🔥 Incendie Bordeaux</span><b onclick="toggleMenu()">✕</b></div>
+    <div class="menu-body">
+      <h3>🎛️ Scénarios de simulation <span class="mh-sub">(ensemble de 12 tirages)</span></h3>
+      <div class="views" id="views">
+        <b data-v="ref" class="on">🎯 Référence</b>
+        <b data-v="opt">🙂 Optimiste</b>
+        <b data-v="pess">⚠️ Pessimiste</b>
+        <b data-v="pyro">🌩️ Si pyroCb</b>
+      </div>
+      <div class="views" style="grid-template-columns:1fr">
+        <b onclick="randomMember()" id="randBtn">🎲 Tirage aléatoire (1 des 12 simulations)</b>
+      </div>
+      <div class="dash-note" id="dashNote">L'incertitude vient de ce qui est vraiment imprévisible :
+        le <b>vent</b> (croissante avec l'échéance), le <b>pyroCb</b> (aléatoire), l'efficacité de la
+        <b>lutte</b>. Température &amp; sécheresse = données observées / prévues.</div>
+
+      <h3>📊 Situation en direct</h3>
+      <div class="grid" id="stats"></div>
+      <div class="src" id="src"></div>
+
+      <h3>🔗 Aller plus loin</h3>
+      <div class="menu-links">
+        <a onclick="toggleMenu();toggleData()">📊 Données brutes des simulations</a>
+        <a href="/methodologie">🔬 Méthodologie scientifique (formules &amp; références)</a>
+        <a href="https://github.com/FelixChop/bordeaux-wildfire-monitor" target="_blank">💻 Code source (GitHub)</a>
+      </div>
+    </div>
   </div>
 
   <div class="datamodal" id="datamodal" style="display:none">
@@ -177,30 +226,7 @@
       <a href="/api/data" target="_blank">état</a></div>
   </div>
 
-  <div class="dash" id="dash" style="display:none">
-    <div class="dash-title">🎛️ Scénarios (ensemble de 12 simulations)</div>
-    <div class="views" id="views">
-      <b data-v="ref" class="on">🎯 Référence</b>
-      <b data-v="opt">🙂 Optimiste</b>
-      <b data-v="pess">⚠️ Pessimiste</b>
-      <b data-v="pyro">🌩️ Si pyroCb</b>
-    </div>
-    <div class="dash-note" id="dashNote">Une seule prévision d'ensemble. L'incertitude vient de ce qui est
-      vraiment imprévisible : le <b>vent</b> (croissante avec l'échéance), le <b>pyroCb</b> (aléatoire),
-      l'efficacité de la <b>lutte</b>. Température &amp; sécheresse = données observées / prévues.</div>
-  </div>
   <div class="computing" id="computing" style="display:none"><div class="spin" style="width:26px;height:26px;border-width:3px;margin:0 10px 0 0"></div>Chargement…</div>
-
-  <div class="panel collapsed" id="panel">
-    <div class="panel-head" onclick="togglePanel()">
-      <h2 id="panelTitle">📊 SITUATION</h2>
-      <span class="chev">▲</span>
-    </div>
-    <div class="body">
-      <div class="grid" id="stats"></div>
-      <div class="src" id="src"></div>
-    </div>
-  </div>
 
   <div class="timeline">
     <div class="tl-row">
@@ -372,10 +398,9 @@ function initDash(){
     b.onclick=()=>setView(b.dataset.v);
   });
 }
-function toggleDash(){
-  const d=$('dash'), on=d.style.display==='none';
-  d.style.display=on?'block':'none';
-  $('dashBtn').classList.toggle('on',on);
+function toggleMenu(){
+  const m=$('menu'), on=m.style.display==='none';
+  m.style.display=on?'flex':'none';
 }
 function toggleData(){
   const m=$('datamodal'), on=m.style.display==='none';
@@ -398,17 +423,23 @@ function buildDataModal(){
   $('dmBody').innerHTML=h+'</table>';
 }
 async function setView(v){
-  state.view=v; state.scen.pyro=(v==='pyro')?'high':'low';
+  state.view=v;
   initDash();
   $('computing').style.display='flex';
   try{
     const sim=await getJSON('/api/scenario?view='+v, 40);
     state.sim=sim;
+    state.scen.pyro=(v==='pyro'||sim.member_pyro)?'high':'low';
+    if($('menu').style.display!=='none') toggleMenu();
     const keep=state.idx;
     buildTimeline();
     render(Math.min(keep, +$('slider').max));
   }catch(e){}
   $('computing').style.display='none';
+}
+function randomMember(){
+  const n=(state.sim&&state.sim.n_runs)||12;
+  setView('m'+Math.floor(Math.random()*n));
 }
 function onSlide(v){ if(state.playing) stop(); render(+v); }
 function render(i){
@@ -509,10 +540,12 @@ function renderSimFrame(f,i){
   }
   drawWindAt(f.timestamp);
   const j=Math.floor((f.hour||0)/24);
-  $('tlTime').textContent=`🔮 ${fmtT(f.timestamp)}`;
+  $('tlTime').textContent=`🔮 SIMULATION · ${fmtT(f.timestamp)}`;
   $('tlTime').style.color='#4fc3f7';
-  const vEmo={ref:'🎯',opt:'🙂',pess:'⚠️',pyro:'🌩️'}[state.view]||'';
-  const day=vEmo+' '+(j>0?`J+${j} · `:'prévision · ');
+  let vEmo={ref:'🎯',opt:'🙂',pess:'⚠️',pyro:'🌩️'}[state.view];
+  if(!vEmo&&state.view.startsWith('m'))
+    vEmo=`🎲 #${+state.view.slice(1)+1}${state.sim&&state.sim.member_pyro?'⛈️':''}`;
+  const day=(vEmo||'')+' '+(j>0?`J+${j} · `:'prévision · ');
   const tmp=(f.temp_c!=null)?` · air ${f.temp_c}°C`:'';
   const rng=(f.area_p10!=null)?` (${Math.round(f.area_p10/1000)}k–${Math.round(f.area_p90/1000)}k)`:'';
   $('tlInfo').textContent=`${day}${(f.area_ha||0).toLocaleString('fr-FR')} ha${rng} · vent ${f.wind_speed_ms} m/s · ${f.humidity_pct}%${tmp}`;
@@ -530,7 +563,6 @@ function play(){
 }
 function stop(){ state.playing=false; $('play').textContent='▶'; if(state.timer){clearInterval(state.timer);state.timer=null;} }
 
-function togglePanel(){ $('panel').classList.toggle('collapsed'); }
 
 // vegetation base layer: ALWAYS on (no toggle) — burned scars darken it
 let vegOverlay=null;

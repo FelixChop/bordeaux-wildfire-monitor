@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Méthodologie scientifique — Incendie Bordeaux</title>
+  <meta name="description" content="Formules mathématiques, références scientifiques et justification de la méthode Monte Carlo utilisées par la simulation de propagation du feu d'incendiebordeaux.fr.">
+  <link rel="canonical" href="https://incendiebordeaux.fr/methodologie">
+  <style>
+    body{font-family:Georgia,'Times New Roman',serif;background:#14110f;color:#e8e0d8;
+      max-width:760px;margin:0 auto;padding:28px 18px 80px;line-height:1.65}
+    h1{font-size:1.5em;color:#ff9800;margin-bottom:4px}
+    h2{font-size:1.15em;color:#ffb74d;margin:34px 0 10px;border-bottom:1px solid #3a2a22;padding-bottom:5px}
+    h3{font-size:1em;color:#ffcc80;margin:20px 0 6px}
+    .sub{color:#a89a8e;font-size:.92em}
+    .eq{background:#1e1915;border-left:3px solid #ff9800;border-radius:6px;
+      padding:10px 16px;margin:12px 0;font-family:ui-monospace,Menlo,monospace;font-size:.92em;overflow-x:auto}
+    code{background:#241d18;padding:1px 5px;border-radius:4px;font-size:.9em}
+    a{color:#4fc3f7;text-decoration:none} a:hover{text-decoration:underline}
+    .ref{font-size:.88em;color:#c9bcb0;margin:6px 0 6px 14px;text-indent:-14px}
+    table{border-collapse:collapse;width:100%;font-size:.9em;margin:10px 0}
+    td,th{border:1px solid #3a2a22;padding:6px 9px;text-align:left}
+    th{color:#ffb74d}
+    .back{display:inline-block;margin-bottom:18px;color:#ff9800}
+    .warn{background:#2a1c10;border:1px solid #7a4a12;border-radius:8px;padding:10px 14px;font-size:.9em}
+  </style>
+</head>
+<body>
+  <a class="back" href="/">← retour à la carte</a>
+  <h1>Méthodologie scientifique</h1>
+  <p class="sub">incendiebordeaux.fr — modèle de propagation, dispersion des fumées et prévision d'ensemble.
+  Code source complet : <a href="https://github.com/FelixChop/bordeaux-wildfire-monitor">github.com/FelixChop/bordeaux-wildfire-monitor</a></p>
+
+  <div class="warn">⚠️ Outil d'information et de pédagogie du risque. Ce n'est <b>pas</b> un outil opérationnel
+  de prévision ni une source officielle — se référer à la Préfecture de la Gironde et aux services de secours.</div>
+
+  <h2>1. Vitesse de propagation du front (ROS)</h2>
+  <p>La vitesse du front de tête (<i>rate of spread</i>) suit une loi puissance du vent, de la famille des
+  modèles empiriques de feux de cime de Cruz &amp; Alexander, recalibrée sur les vitesses observées des
+  grands feux du massif landais (0,3–1,5 km/h en feu de tête, ex. Landiras 2022) :</p>
+  <div class="eq">ROS = C · U<sup>1,3</sup> · f<sub>RH</sub> · f<sub>T</sub> · f<sub>sol</sub> · F&nbsp;&nbsp;&nbsp;[m/min],&nbsp; plafonné à 25 m/min
+<br>C = 0,25 &nbsp;·&nbsp; U = vent à 10 m [m/s]
+<br>f<sub>RH</sub> = clip(1,3 − RH/55 ; 0,08 ; 1,3) &nbsp;&nbsp;(assèchement par l'air sec)
+<br>f<sub>T</sub> = clip(1 + 0,04·(T − 25) ; 0,6 ; 1,6) &nbsp;&nbsp;(préchauffage du combustible)
+<br>f<sub>sol</sub> = clip(1,45 − 3,5·θ ; 0,45 ; 1,35), θ = humidité du sol 0-7 cm [m³/m³]
+<br>F ∈ [0 ; ~1,3] : densité de combustible (NDVI) × hétérogénéité gelée (§4)</div>
+  <p class="ref">— Cruz M.G. &amp; Alexander M.E. (2010), <i>Assessing crown fire potential in coniferous forests</i>, Int. J. Wildland Fire 19.</p>
+  <p class="ref">— Rothermel R.C. (1972), <i>A mathematical model for predicting fire spread in wildland fuels</i>, USDA INT-115 — base historique ; sa forme de surface pure sous-estime les feux de tête landais, d'où la recalibration empirique assumée.</p>
+  <p class="ref">— Sensibilités RH/T/θ inspirées des indices de danger (FWI canadien : Van Wagner 1987, <i>Development and structure of the Canadian FWI System</i>).</p>
+
+  <h2>2. Propagation spatiale (automate raster stochastique)</h2>
+  <p>Grille ~550 m. Chaque cellule en feu pousse ses voisines situées dans le demi-plan sous le vent
+  (produit scalaire direction-voisin ≥ 0,25). L'avancée accumule un reliquat sous-cellule :
+  le front avance quand <code>∑ ROS·dt ≥ taille de cellule</code>. Chaque avancée candidate ne réussit
+  qu'avec probabilité p = 0,7 (vitesse moyenne compensée par ROS/p) : le front devient rugueux et
+  digité, comme un vrai feu (croissance de type Eden stochastique), au lieu d'anneaux lisses.
+  L'eau et les zones sans végétation (F = 0) bloquent le feu.</p>
+  <p class="ref">— Eden M. (1961), <i>A two-dimensional growth process</i> ; rugosité des fronts de croissance stochastiques : Kardar, Parisi &amp; Zhang (1986), PRL 56.</p>
+
+  <h2>3. Sautes de feu (spotting)</h2>
+  <p>Des braises transportées allument des foyers <b>en avant</b> du front, tirées d'un processus de
+  Poisson chaque heure : sautes courtes de routine (0,3–1,5 km, taux 0,35/h) et, si un
+  pyrocumulonimbus est actif, sautes longues (2–8 km, taux 1,2/h), orientées sous le vent ±20°.</p>
+  <p class="ref">— Albini F.A. (1979), <i>Spot fire distance from burning trees</i>, USDA INT-56.</p>
+  <p class="ref">— Koo E. et al. (2010), <i>Firebrands and spotting ignition in large-scale fires</i>, Int. J. Wildland Fire 19 — portées observées de 0,1 à &gt;10 km.</p>
+
+  <h2>4. Combustible : NDVI + hétérogénéité gelée</h2>
+  <p>La densité de combustible F provient du NDVI MODIS (composite 8 jours). L'eau (NDVI nul) bloque,
+  l'urbain freine, la forêt de pins accélère. Chaque tirage de l'ensemble multiplie F par un champ
+  aléatoire log-normal corrélé spatialement (bruit gaussien lissé σ ≈ 1,4 km, écart-type 0,45 en log),
+  figé pendant le tirage : il crée couloirs, « jackpots » et trouées — l'équivalent statistique des
+  parcelles, pare-feux et pistes que la carte NDVI lissée ne résout pas.</p>
+
+  <h2>5. Pyrocumulonimbus (orages de feu)</h2>
+  <p>Les grands incendies génèrent leur propre convection : colonnes convectives jusqu'à la
+  stratosphère, vents de surface erratiques, rafales descendantes et pluies de braises massives.
+  Dynamiques incluses dans le modèle quand un pyroCb est actif (tiré aléatoirement chaque jour avec
+  P = 7 %/jour, fenêtre convective 12h–22h) :</p>
+  <table>
+    <tr><th>Dynamique physique</th><th>Traduction dans le calcul</th></tr>
+    <tr><td>Vents erratiques / rotations brutales</td><td>bruit de direction additionnel ~N(0, 35°) par heure</td></tr>
+    <tr><td>Intensification convective du front</td><td>ROS × 1,35 pendant la fenêtre active</td></tr>
+    <tr><td>Pluies de braises longue portée</td><td>sautes Poisson 1,2/h à 2–8 km (§3)</td></tr>
+  </table>
+  <p class="ref">— Fromm M. et al. (2010), <i>The untold story of pyrocumulonimbus</i>, Bull. Amer. Meteor. Soc. 91.</p>
+  <p class="ref">— Peterson D.A. et al. (2018), <i>Wildfire-driven thunderstorms cause a volcano-like stratospheric injection of smoke</i>, npj Climate &amp; Atmos. Sci. 1.</p>
+  <p class="ref">— McRae R.H.D. &amp; Sharples J.J. (2015), sur les conditions d'emballement convectif des feux (blow-up), IJWF.</p>
+
+  <h2>6. Prévision d'ensemble Monte Carlo — justification</h2>
+  <p>On propage <b>l'incertitude des entrées réellement imprévisibles</b> à travers la dynamique non
+  linéaire du feu en tirant N = 12 simulations indépendantes :</p>
+  <div class="eq">vent : marche aléatoire AR(1) sur la direction et log-vitesse,
+<br>&nbsp;&nbsp;σ<sub>dir</sub>(h) = 1,8 + 1,1·(h/24) [°/h], persistance 0,92 → l'incertitude CROÎT avec l'échéance
+<br>pyroCb : Bernoulli quotidien P = 0,07 → P(≥1 sur 7 j) ≈ 40 %
+<br>lutte : efficacité × LogNormale(0 ; 0,15)
+<br>combustible : champ log-normal corrélé par tirage (§4)</div>
+  <p><b>Pourquoi c'est mathématiquement correct.</b> Pour toute observable g (surface brûlée,
+  atteinte d'une commune…), l'estimateur Monte Carlo <code>ĝ = (1/N)·∑ g(X<sub>i</sub>)</code> est
+  <b>sans biais</b> et converge presque sûrement vers E[g(X)] (loi forte des grands nombres) ; le
+  théorème central limite donne une erreur en O(σ/√N), <b>indépendante de la dimension</b> de l'espace
+  des entrées — décisif ici où l'aléa vit en très grande dimension (une trajectoire de vent horaire ×
+  7 jours + champs de combustible). Les quantiles empiriques (p10, médiane, p90) sont des estimateurs
+  convergents des quantiles de la distribution prédictive. Avec N = 12, l'erreur sur les quantiles
+  extrêmes reste large : c'est pourquoi l'interface affiche la <b>fourchette p10–p90</b> plutôt qu'une
+  fausse précision, et montre des <b>membres individuels</b> (morphologie réaliste) plutôt que la
+  moyenne cellule à cellule, qui lisserait artificiellement les formes.</p>
+  <p>Cette approche est le standard opérationnel : c'est le principe des prévisions d'ensemble
+  météorologiques et du système FSPro utilisé par l'US Forest Service pour la probabilité de
+  propagation des grands feux.</p>
+  <p class="ref">— Metropolis N. &amp; Ulam S. (1949), <i>The Monte Carlo method</i>, JASA 44.</p>
+  <p class="ref">— Leith C.E. (1974), <i>Theoretical skill of Monte Carlo forecasts</i>, Mon. Wea. Rev. 102 ; Palmer T.N. (2000), <i>Predicting uncertainty in forecasts of weather and climate</i>, Rep. Prog. Phys. 63.</p>
+  <p class="ref">— Finney M.A. et al. (2011), <i>A simulation of probabilistic wildfire risk components for the continental United States</i> (FSPro/FSim), Stoch. Env. Res. Risk Assess. 25.</p>
+
+  <h2>7. Lutte anti-incendie</h2>
+  <div class="eq">ROS<sub>eff</sub> = ROS · (1 − E),&nbsp; E = clip(0,75 · m · ramp(h) · w(U) ; 0 ; 0,95)
+<br>ramp(h) = min(1, h/18) &nbsp;(montée en puissance des moyens ~18 h)
+<br>w(U) = clip(1,15 − U/14 ; 0,25 ; 1) &nbsp;(feu de tête incontrôlable par vent fort)
+<br>m ~ LogNormale(0 ; 0,15) par tirage</div>
+  <p class="ref">— Ordres de grandeur d'efficacité et seuils de contrôlabilité : Hirsch &amp; Martell (1996), <i>A review of initial attack fire crew productivity</i>, IJWF ; doctrine « règle des 30-30-30 ».</p>
+
+  <h2>8. Dispersion des fumées (qualité de l'air prédite)</h2>
+  <p>Nappe advectée sur grille ~4 km par schéma semi-lagrangien sous-échantillonné
+  (déplacement ≤ 1,2 cellule par sous-pas — sans quoi un vent fort ferait « sauter » le panache
+  au-dessus des villes), avec diffusion gaussienne et dépôt :</p>
+  <div class="eq">S<sub>t+dt</sub> = G<sub>σ</sub> ∗ A(S<sub>t</sub>, u·dt) · λ + Q·B<sub>t</sub>
+<br>A : advection semi-lagrangienne (vent moyen horaire) · G<sub>σ</sub> : diffusion (σ≈0,7 cellule/h)
+<br>λ = 0,93/h (dépôt + dilution verticale) · B<sub>t</sub> : cellules en feu depuis &lt; 12 h · Q : taux d'émission</div>
+  <p>C'est la discrétisation classique de l'équation d'advection-diffusion-réaction des panaches.
+  Le champ observé (passé/présent) vient lui du modèle <b>CAMS</b> de Copernicus (chimie-transport
+  complet, résolution ~11 km), qui assimile les émissions de feux réelles.</p>
+  <p class="ref">— Stohl A. et al. (2005), <i>The Lagrangian particle dispersion model FLEXPART</i>, ACP 5 (principe advection-diffusion-dépôt).</p>
+
+  <h2>9. Sources de données (APIs)</h2>
+  <table>
+    <tr><th>Donnée</th><th>Source / API</th><th>Fréquence</th></tr>
+    <tr><td>Foyers actifs (précis)</td><td><a href="https://firms.modaps.eosdis.nasa.gov/">NASA FIRMS</a> — VIIRS S-NPP/NOAA-20/NOAA-21 + MODIS</td><td>~4 passages/jour</td></tr>
+    <tr><td>Détection géostationnaire</td><td><a href="https://data.eumetsat.int/">EUMETSAT</a> — Active Fire Monitoring MTG (EO:EUM:DAT:0682)</td><td>~10 min</td></tr>
+    <tr><td>Vent, T°, humidité, sol</td><td><a href="https://open-meteo.com/">Open-Meteo</a> (AROME / ARPEGE / ECMWF, grille 6×6)</td><td>horaire, J-5 → J+8</td></tr>
+    <tr><td>Qualité de l'air observée</td><td>Open-Meteo Air Quality (modèle <b>CAMS</b> Copernicus)</td><td>horaire</td></tr>
+    <tr><td>Végétation (combustible)</td><td><a href="https://gibs.earthdata.nasa.gov/">NASA GIBS</a> — NDVI MODIS 8 jours</td><td>8 jours</td></tr>
+    <tr><td>Contours des communes</td><td><a href="https://geo.api.gouv.fr/">geo.api.gouv.fr</a> (IGN/INSEE)</td><td>statique</td></tr>
+    <tr><td>Trafic routier</td><td>TomTom Traffic Incidents (désactivé dans l'UI)</td><td>2 min</td></tr>
+  </table>
+
+  <h2>10. Limites connues</h2>
+  <p>Raster 550 m sans coupe-feux/routes explicites (traités statistiquement §4) ; lutte modélisée en
+  réduction moyenne de ROS et non en tactique spatiale ; N = 12 tirages (quantiles extrêmes bruités) ;
+  calibration ROS régionale (Landes) non transférable telle quelle ; fumée sans chimie ni inversion
+  thermique explicite. Les surfaces sont des <b>ordres de grandeur encadrés</b>, pas des mesures.</p>
+
+  <p class="sub" style="margin-top:34px">Code source, données et historique complet :
+  <a href="https://github.com/FelixChop/bordeaux-wildfire-monitor">FelixChop/bordeaux-wildfire-monitor</a>.
+  Construit avec Claude (Anthropic).</p>
+</body>
+</html>
