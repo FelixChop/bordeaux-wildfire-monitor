@@ -540,82 +540,57 @@ def _sim_inputs():
     return active, wind, wf, _veg_cache.get('fuel'), now_key
 
 
-def compute_scenario(levels, n_runs):
-    """Compute (or serve cached) ensemble for a levels tuple."""
+_ens_store = {'ver': None, 'views': {}}
+_VIEWS = ('ref', 'opt', 'pess', 'pyro')
+
+
+def compute_ensemble():
+    """One honest ensemble; all views derived from it. Background-heavy."""
     if not latest_data:
         return None
-    from src.fire_front import simulate_monte_carlo
-    key = ','.join(levels)
+    from src.fire_front import simulate_ensemble, derive_view
     ver = f"{last_update}:{datetime.utcnow().strftime('%dT%H')}"
-    ent = _scenario_cache.get(key)
-    if ent and ent['ver'] == ver:
-        return ent['data']
-    with _sim_lock:      # serialize heavy computations
-        ent = _scenario_cache.get(key)
-        if ent and ent['ver'] == ver:
-            return ent['data']
+    if _ens_store['ver'] == ver:
+        return _ens_store['views']
+    if not _sim_lock.acquire(blocking=False):
+        return _ens_store['views'] or None
+    try:
+        if _ens_store['ver'] == ver:
+            return _ens_store['views']
         hotspots, wind, wf, fuel, _ = _sim_inputs()
-        mods = _scenario_mods(*levels)
-        data = simulate_monte_carlo(
+        store = simulate_ensemble(
             hotspots, wind, wind_field=wf, veg_fuel=fuel, veg_bbox=SIM_BBOX,
-            max_hours=168, emit_every=3, n_runs=n_runs,
-            suppression=(mods['supp_base'] > 0), scenario=mods)
-        for f in data.get('frames', []):
-            ts = f.get('timestamp')
-            if ts and not ts.endswith('Z'):
-                f['timestamp'] = ts + 'Z'
-        data['levels'] = dict(zip(_SCEN_FACTORS, levels))
-        if len(_scenario_cache) > 24:
-            _scenario_cache.clear()
-        _scenario_cache[key] = {'ver': ver, 'data': data}
-        return data
+            max_hours=168, n_runs=int(os.getenv('ENS_RUNS', '12')))
+        views = {}
+        for v in _VIEWS:
+            d = derive_view(store, v)
+            for f in d.get('frames', []):
+                ts = f.get('timestamp')
+                if ts and not ts.endswith('Z'):
+                    f['timestamp'] = ts + 'Z'
+            views[v] = d
+        _ens_store['views'] = views
+        _ens_store['ver'] = ver
+        print(f"✓ Ensemble {ver}: {len(views)} vues prêtes")
+    finally:
+        _sim_lock.release()
+    return _ens_store['views']
 
 
 @app.route('/api/scenario')
 def api_scenario():
-    """Ensemble forecast for user-chosen factor levels (low/med/high)."""
+    """Ensemble views: ?view=ref (défaut) | opt | pess | pyro."""
     if not latest_data:
         return jsonify({'error': 'No data available'}), 503
-    levels = tuple(
-        request.args.get(f, 'med') if request.args.get(f, 'med') in _LVL else 'med'
-        for f in _SCEN_FACTORS)
-    default = all(l == 'med' for l in levels)
-    data = compute_scenario(levels, int(os.getenv('MC_RUNS', '8')) if default
-                            else int(os.getenv('SCEN_RUNS', '4')))
+    views = _ens_store['views'] or compute_ensemble()
+    view = request.args.get('view', 'ref')
+    data = (views or {}).get(view if view in _VIEWS else 'ref')
     return jsonify(data if data else {'error': 'Computing'}), (200 if data else 503)
 
 
-def _precompute_combos():
-    """Scenario combos precomputed hourly so users are pure consumers:
-    reference + each factor varied one-at-a-time + extreme corners."""
-    combos = [('med',) * 5]
-    for i in range(5):
-        for lv in ('low', 'high'):
-            c = ['med'] * 5
-            c[i] = lv
-            combos.append(tuple(c))
-    combos += [
-        ('low', 'high', 'high', 'high', 'high'),   # pire cas absolu
-        ('high', 'high', 'high', 'high', 'high'),  # conditions extrêmes + lutte max
-        ('high', 'med', 'med', 'med', 'med'),
-        ('low', 'low', 'low', 'low', 'low'),
-    ]
-    return combos
-
-
 def compute_simulation():
-    """Precompute scenario ensembles in background (users only consume)."""
-    if not latest_data:
-        return None
-    default = compute_scenario(('med',) * 5, int(os.getenv('MC_RUNS', '8')))
-    n = int(os.getenv('SCEN_RUNS', '4'))
-    for combo in _precompute_combos()[1:]:
-        try:
-            compute_scenario(combo, n)
-        except Exception as e:
-            print(f"precompute {combo} error: {e}")
-    print(f"✓ {len(_scenario_cache)} scénarios en cache")
-    return {'lutte': default}
+    """Background precompute: the single ensemble + its 4 views."""
+    return compute_ensemble()
 
 
 def _obsolete_compute_simulation():
@@ -682,15 +657,12 @@ def _obsolete_compute_simulation():
 
 @app.route('/api/simulation')
 def api_simulation():
-    """Monte-Carlo ensemble forecast. ?mode=lutte (défaut) | libre."""
+    """Compat: serves the reference view of the ensemble."""
     if not latest_data:
         return jsonify({'error': 'No data available'}), 503
-    both = compute_simulation()
-    if not both:
-        return jsonify({'error': 'Computing'}), 503
-    mode = request.args.get('mode', 'lutte')
-    data = both.get(mode) or both.get('lutte')
-    return jsonify(data if data is not None else {'error': 'No data'}), (200 if data else 503)
+    views = _ens_store['views'] or compute_ensemble()
+    data = (views or {}).get('ref')
+    return jsonify(data if data else {'error': 'Computing'}), (200 if data else 503)
 
 
 @app.route('/api/vegetation.png')

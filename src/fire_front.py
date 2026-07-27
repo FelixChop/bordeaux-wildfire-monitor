@@ -119,8 +119,11 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
     supp_mult = p.get('supp_mult', 1.0)
     supp_base = sc.get('supp_base', 0.75)
     soil_off = sc.get('soil_off_g', 0.0)
-    dir_noise = p.get('dir_noise')          # per-hour array (pyroCb chaos)
-    spot_rate = sc.get('pyro_spot', 0.0)    # expected ember-spot fires per hour
+    dir_noise = p.get('dir_noise')          # per-hour array (wind uncertainty)
+    speed_mult_h = p.get('speed_mult_h')    # per-hour array
+    cal_h = p.get('cal_h')                  # per-hour array (pyroCb boost)
+    spot_h = p.get('spot_h')                # per-hour spotting rate array
+    spot_rate = sc.get('pyro_spot', 0.0)
     rng = p.get('rng')
 
     nrows, ncols = dom['nrows'], dom['ncols']
@@ -180,10 +183,13 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
                     if t is not None else None)
             soil = None
 
+        if speed_mult_h is not None:
+            speed = speed * float(speed_mult_h[h])
         pmag = np.hypot(pe, pn) + 1e-9
         pe_u, pn_u = pe / pmag, pn / pmag
 
-        ros = _ros_grid(speed, rh, fuel_grid, temp, cal_mult, soil)
+        cal_eff = cal_mult * (float(cal_h[h]) if cal_h is not None else 1.0)
+        ros = _ros_grid(speed, rh, fuel_grid, temp, cal_eff, soil)
         if suppression:
             # Firefighting model: ground crews + air support (Canadairs, Dash,
             # helicopters). Effectiveness ramps up over ~18 h as resources
@@ -215,8 +221,9 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
 
         # PyroCumulonimbus spotting: the convective column lofts embers that
         # ignite NEW fires kilometres AHEAD of the front, downwind.
-        if spot_rate > 0 and rng is not None:
-            n_spots = rng.poisson(spot_rate)
+        rate_h = float(spot_h[h]) if spot_h is not None else spot_rate
+        if rate_h > 0 and rng is not None:
+            n_spots = rng.poisson(rate_h)
             if n_spots:
                 recent = burned & (ign >= h - 3)
                 if h < 3:
@@ -319,3 +326,110 @@ def simulate_monte_carlo(hotspots, wind_records, wind_field=None, veg_fuel=None,
 
     return {'n_frames': len(frames), 'n_seeds': dom['n_seeds'],
             'n_runs': n_runs, 'suppression': bool(suppression), 'frames': frames}
+
+
+# ---------------------------------------------------------------------------
+# Single "honest" ensemble: uncertainty comes ONLY from what is genuinely
+# unpredictable — wind beyond ~day 2 (perturbation grows with lead time),
+# pyroCb occurrence (stochastic per run), suppression effectiveness.
+# Temperature / humidity / soil dryness are used as observed/forecast (they
+# are predictable at these lead times). Views are read off the ensemble:
+# ref = median footprint, opt = p10-ish, pess = p90-ish, pyro = pyroCb runs.
+# ---------------------------------------------------------------------------
+
+def simulate_ensemble(hotspots, wind_records, wind_field=None, veg_fuel=None,
+                      veg_bbox=None, max_hours=168, n_runs=12, rng_seed=0,
+                      pyro_daily_p=0.07):   # P(≥1 pyroCb sur 7 j) ≈ 40 %
+    if binary_dilation is None:
+        return None
+    dom = _prepare_domain(hotspots, veg_fuel, veg_bbox)
+    if dom is None:
+        return None
+    rng = np.random.default_rng(rng_seed)
+    igns, pyro_flags, meta = [], [], None
+
+    for k in range(n_runs):
+        pert = {'rng': rng,
+                'supp_mult': float(np.exp(rng.normal(0, 0.15)))}
+        # wind uncertainty grows with lead time (random walk, ° and ×)
+        dn = np.zeros(max_hours)
+        sm = np.zeros(max_hours)
+        for h in range(1, max_hours):
+            day = h / 24.0
+            dn[h] = dn[h - 1] * 0.92 + rng.normal(0, 1.8 + 1.1 * day)
+            sm[h] = sm[h - 1] * 0.92 + rng.normal(0, 0.015 + 0.008 * day)
+        if k > 0:  # run 0 = trajectoire de référence non perturbée
+            pert['dir_noise'] = dn
+            pert['speed_mult_h'] = np.exp(sm)
+        # pyroCb: each afternoon may develop one (stochastic), boosting spread
+        cal_arr = np.ones(max_hours)
+        spot_arr = np.zeros(max_hours)
+        pyro_any = False
+        for d in range(max_hours // 24 + 1):
+            if rng.random() < pyro_daily_p:
+                pyro_any = True
+                h0, h1 = d * 24 + 12, min(d * 24 + 22, max_hours)
+                if h0 < max_hours:
+                    cal_arr[h0:h1] = 1.35
+                    spot_arr[h0:h1] = 1.2
+                    if 'dir_noise' in pert:
+                        pert['dir_noise'][h0:h1] += rng.normal(0, 35, max(h1 - h0, 0))
+        pert['cal_h'] = cal_arr
+        pert['spot_h'] = spot_arr
+        ign, m, n_hours = _run_once(dom, wind_field, wind_records, max_hours,
+                                    pert, want_meta=(k == 0), suppression=True)
+        igns.append(ign)
+        pyro_flags.append(pyro_any)
+        if k == 0:
+            meta = m
+
+    return {'igns': np.stack(igns), 'pyro': np.array(pyro_flags),
+            'dom': dom, 'meta': meta, 'n_hours': n_hours, 'n_runs': n_runs}
+
+
+_VIEW_THR = {'ref': 0.5, 'opt': 0.85, 'pess': 0.2, 'pyro': 0.5}
+
+
+def derive_view(store, view='ref', emit_every=3):
+    """Cheap projection of the stored ensemble into a map view."""
+    if store is None:
+        return {'n_frames': 0, 'frames': [], 'n_seeds': 0, 'n_runs': 0}
+    igns, dom, meta = store['igns'], store['dom'], store['meta']
+    n_hours = store['n_hours']
+    thr = _VIEW_THR.get(view, 0.5)
+    sel = np.ones(len(igns), dtype=bool)
+    if view == 'pyro' and store['pyro'].any():
+        sel = store['pyro']
+    ig = igns[sel]
+    seed = dom['seed_mask']
+
+    emit_hours = sorted(set(list(range(0, n_hours, emit_every)) + [n_hours - 1]))
+    frames = []
+    prev = np.zeros_like(seed)
+    for H in emit_hours:
+        burned_runs = seed[None, :, :] | ((ig >= 0) & (ig <= H))
+        prob = burned_runs.mean(axis=0)
+        foot = prob >= thr
+        areas = burned_runs.sum(axis=(1, 2)) * dom['cell_area_ha']
+        newly = foot & ~prev & ~seed
+        nr, nc = np.where(newly)
+        new_pts = [[round(float(dom['lat_axis'][r]), 4),
+                    round(float(dom['lon_axis'][c]), 4), int(H)]
+                   for r, c in zip(nr.tolist(), nc.tolist()) if (r + c) % 2 == 0]
+        prev = foot
+        mm = meta[H] if meta and H < len(meta) else {}
+        # headline area matches the view: opt = p10, pess = p90, sinon médiane
+        headline = {'opt': np.percentile(areas, 10),
+                    'pess': np.percentile(areas, 90)}.get(view, np.median(areas))
+        frames.append({
+            'hour': int(H), 'timestamp': mm.get('timestamp'),
+            'wind_speed_ms': mm.get('wind', 0), 'humidity_pct': mm.get('rh', 0),
+            'temp_c': mm.get('temp'),
+            'area_ha': int(headline),
+            'area_p10': int(np.percentile(areas, 10)),
+            'area_p90': int(np.percentile(areas, 90)),
+            'new_points': new_pts,
+        })
+    return {'n_frames': len(frames), 'n_seeds': dom['n_seeds'],
+            'n_runs': int(sel.sum()), 'view': view,
+            'pyro_runs': int(store['pyro'].sum()), 'frames': frames}

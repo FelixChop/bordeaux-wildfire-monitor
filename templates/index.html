@@ -101,10 +101,10 @@
     .dash-title{font-size:12px;font-weight:700;color:var(--fire2);margin-bottom:8px}
     .dash-row{display:flex;align-items:center;justify-content:space-between;margin:6px 0}
     .dash-row>span{font-size:11.5px;color:var(--txt)}
-    .seg{display:flex;gap:2px}
-    .seg b{font-size:10px;font-weight:600;padding:3px 7px;border-radius:8px;cursor:pointer;
-      background:rgba(255,255,255,.07);color:var(--muted);border:1px solid transparent}
-    .seg b.on{background:var(--fire);color:#fff}
+    .views{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin:4px 0 2px}
+    .views b{font-size:11px;font-weight:600;padding:7px 6px;border-radius:9px;cursor:pointer;
+      text-align:center;background:rgba(255,255,255,.07);color:var(--muted);border:1px solid transparent}
+    .views b.on{background:var(--fire);color:#fff}
     .dash-note{font-size:9.5px;color:var(--muted);margin-top:7px;line-height:1.35}
     .computing{position:fixed;z-index:1500;left:50%;top:14%;transform:translateX(-50%);
       display:flex;align-items:center;background:rgba(20,16,14,.95);border:1px solid var(--fire);
@@ -155,15 +155,18 @@
   </div>
 
   <div class="dash" id="dash" style="display:none">
-    <div class="dash-title">🎛️ Scénario de simulation</div>
-    <div class="dash-row" data-f="pompiers"><span>🚒 Pompiers</span><div class="seg"></div></div>
-    <div class="dash-row" data-f="vent"><span>💨 Vent</span><div class="seg"></div></div>
-    <div class="dash-row" data-f="temp"><span>☀️ Température</span><div class="seg"></div></div>
-    <div class="dash-row" data-f="secheresse"><span>🏜️ Sécheresse</span><div class="seg"></div></div>
-    <div class="dash-row" data-f="pyro"><span>🌩️ PyroCb</span><div class="seg"></div></div>
-    <div class="dash-note" id="dashNote">réglages moyens = prévision de référence · combinaisons courantes précalculées</div>
+    <div class="dash-title">🎛️ Scénarios (ensemble de 12 simulations)</div>
+    <div class="views" id="views">
+      <b data-v="ref" class="on">🎯 Référence</b>
+      <b data-v="opt">🙂 Optimiste</b>
+      <b data-v="pess">⚠️ Pessimiste</b>
+      <b data-v="pyro">🌩️ Si pyroCb</b>
+    </div>
+    <div class="dash-note" id="dashNote">Une seule prévision d'ensemble. L'incertitude vient de ce qui est
+      vraiment imprévisible : le <b>vent</b> (croissante avec l'échéance), le <b>pyroCb</b> (aléatoire),
+      l'efficacité de la <b>lutte</b>. Température &amp; sécheresse = données observées / prévues.</div>
   </div>
-  <div class="computing" id="computing" style="display:none"><div class="spin" style="width:26px;height:26px;border-width:3px;margin:0 10px 0 0"></div>Calcul du scénario…</div>
+  <div class="computing" id="computing" style="display:none"><div class="spin" style="width:26px;height:26px;border-width:3px;margin:0 10px 0 0"></div>Chargement…</div>
 
   <div class="panel collapsed" id="panel">
     <div class="panel-head" onclick="togglePanel()">
@@ -332,14 +335,13 @@ function buildTimeline(){
     (state.nowIdx/Math.max(state.frames.length-1,1)*100)+'%');
 }
 
-// ---- scenario dashboard ----
-state.scen={pompiers:'med',vent:'med',temp:'med',secheresse:'med',pyro:'med'};
-const LVLS=['low','med','high'];
+// ---- ensemble view selector ----
+state.view='ref';
+state.scen={pyro:'low'};   // compat pour l'illustration pyroCb
 function initDash(){
-  document.querySelectorAll('.dash-row').forEach(row=>{
-    const f=row.dataset.f, seg=row.querySelector('.seg');
-    seg.innerHTML=LVLS.map(l=>`<b data-l="${l}" class="${state.scen[f]===l?'on':''}">${l}</b>`).join('');
-    seg.querySelectorAll('b').forEach(b=>b.onclick=()=>setFactor(f,b.dataset.l));
+  document.querySelectorAll('#views b').forEach(b=>{
+    b.classList.toggle('on', b.dataset.v===state.view);
+    b.onclick=()=>setView(b.dataset.v);
   });
 }
 function toggleDash(){
@@ -347,20 +349,12 @@ function toggleDash(){
   d.style.display=on?'block':'none';
   $('dashBtn').classList.toggle('on',on);
 }
-let scenTimer=null;
-function setFactor(f,l){
-  state.scen[f]=l; initDash();
-  const def=Object.values(state.scen).every(v=>v==='med');
-  $('dashNote').textContent=def?'réglages moyens = prévision de référence'
-    :'scénario personnalisé — la simulation reflète tes réglages';
-  clearTimeout(scenTimer);
-  scenTimer=setTimeout(loadScenario, 600);   // debounce multi-clics
-}
-async function loadScenario(){
+async function setView(v){
+  state.view=v; state.scen.pyro=(v==='pyro')?'high':'low';
+  initDash();
   $('computing').style.display='flex';
   try{
-    const qs=Object.entries(state.scen).map(([k,v])=>`${k}=${v}`).join('&');
-    const sim=await getJSON('/api/scenario?'+qs, 80);
+    const sim=await getJSON('/api/scenario?view='+v, 40);
     state.sim=sim;
     const keep=state.idx;
     buildTimeline();
@@ -469,7 +463,8 @@ function renderSimFrame(f,i){
   const j=Math.floor((f.hour||0)/24);
   $('tlTime').textContent=`🔮 ${fmtT(f.timestamp)}`;
   $('tlTime').style.color='#4fc3f7';
-  const day=(state.simMode==='lutte'?'🚒 ':'')+(j>0?`J+${j} · `:'prévision · ');
+  const vEmo={ref:'🎯',opt:'🙂',pess:'⚠️',pyro:'🌩️'}[state.view]||'';
+  const day=vEmo+' '+(j>0?`J+${j} · `:'prévision · ');
   const tmp=(f.temp_c!=null)?` · air ${f.temp_c}°C`:'';
   const rng=(f.area_p10!=null)?` (${Math.round(f.area_p10/1000)}k–${Math.round(f.area_p90/1000)}k)`:'';
   $('tlInfo').textContent=`${day}${(f.area_ha||0).toLocaleString('fr-FR')} ha${rng} · vent ${f.wind_speed_ms} m/s · ${f.humidity_pct}%${tmp}`;
