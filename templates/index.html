@@ -175,13 +175,14 @@ async function getJSON(url, tries=20){
 async function boot(){
   try{
     const data=await getJSON('/api/data');           // wait until data is warm
-    const [past,sim,wind,airh]=await Promise.all([
+    const [past,sim,wind,airh,meteo]=await Promise.all([
       getJSON('/api/fire-history'),
       getJSON('/api/simulation'),
       getJSON('/api/windfield').catch(()=>null),
-      fetch('/api/aircraft-history').then(r=>r.json()).catch(()=>({positions:[]}))
+      fetch('/api/aircraft-history').then(r=>r.json()).catch(()=>({positions:[]})),
+      fetch('/api/meteosat').then(r=>r.json()).catch(()=>null)
     ]);
-    state.data=data; state.past=past; state.sim=sim; state.wind=wind; state.airHist=airh;
+    state.data=data; state.past=past; state.sim=sim; state.wind=wind; state.airHist=airh; state.meteo=meteo;
     renderStats();
     fitToFire();
     setMode('past');
@@ -210,7 +211,8 @@ function renderStats(){
     <div class="stat"><div class="l">🔴 Foyers actifs (5 j)</div><div class="v">${fp.n_hotspots}</div></div>
     <div class="stat"><div class="l">💨 Vent moyen (24 h)</div><div class="v">${avgS.toFixed(1)} m/s ${dirLabel(avgD)}</div></div>
     <div class="stat ${away?'ok':'warn'}"><div class="l">⚠️ Risque Bordeaux</div><div class="v">${away?'Faible':'À surveiller'}</div></div>
-    <div class="stat" style="grid-column:1/-1"><div class="l">🛰️ Dernier passage satellite</div><div class="v">${lastDet?fmtT(lastDet)+' ('+ago(lastDet)+')':'—'}</div></div>
+    <div class="stat" style="grid-column:1/-1"><div class="l">🛰️ Dernier passage satellite (foyers précis)</div><div class="v">${lastDet?fmtT(lastDet)+' ('+ago(lastDet)+')':'—'}</div></div>
+    ${meteoTile(state.meteo)}
     ${airTile(d.air)}`;
   $('src').innerHTML=`Foyers : NASA FIRMS ${sats?'('+sats+')':''} · Météo : Open-Meteo · Végétation : NDVI MODIS<br>Surveillance actualisée chaque heure · dernière vérif : ${fmtT(d.timestamp+'Z')}`;
 }
@@ -224,6 +226,14 @@ function aqiInfo(a){
   if(a<=80) return {t:'Mauvais',c:'warn'};
   if(a<=100) return {t:'Très mauvais',c:'fire'};
   return {t:'Extrême',c:'fire'};
+}
+function meteoTile(m){
+  if(!m||!m.available) return '';
+  const n=(m.fires||[]).length;
+  const cls=n>0?'fire':'ok';
+  return `<div class="stat ${cls}" style="grid-column:1/-1"><div class="l">🔥 Détection géostationnaire (~10 min)</div>`+
+    `<div class="v">${m.time?ago(m.time):'—'}${n>0?' · '+n+' point(s) feu Gironde':' · rien sur zone'}</div>`+
+    `<div class="l" style="margin-top:3px">Meteosat MTG — comble les 2 passages/jour</div></div>`;
 }
 function airTile(air){
   if(!air) return '';
@@ -276,6 +286,15 @@ function renderPast(i){
     L.circleMarker([p.lat,p.lon],{radius:r,color:col,weight:.5,
       fillColor:col,fillOpacity:.75}).addTo(firePts);
   });
+  // near-real-time geostationary fire pixels (Meteosat, ~10 min) — latest image
+  const mf=state.meteo&&state.meteo.fires;
+  if(mf&&mf.length){
+    mf.forEach(p=>{
+      L.rectangle([[p.lat-0.018,p.lon-0.024],[p.lat+0.018,p.lon+0.024]],
+        {color:'#ffea00',weight:2,fillColor:'#ffea00',fillOpacity:.5})
+        .bindTooltip('Feu détecté Meteosat (~10 min)').addTo(firePts);
+    });
+  }
   // replay recorded water-bomber positions within this hour
   const ah=state.airHist&&state.airHist.positions;
   if(ah&&ah.length){

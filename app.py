@@ -798,6 +798,83 @@ def api_aircraft():
     return jsonify({'aircraft': _cached('aircraft', 45, prod) or []})
 
 
+def _eum_token():
+    key = os.getenv('EUM_CONSUMER_KEY')
+    sec = os.getenv('EUM_CONSUMER_SECRET')
+    if not key:
+        return None
+    r = requests.post('https://api.eumetsat.int/token', auth=(key, sec),
+                      data={'grant_type': 'client_credentials'}, timeout=15)
+    return r.json().get('access_token') if r.status_code == 200 else None
+
+
+def fetch_meteosat_fire():
+    """Geostationary fire detection (MTG FCI, every ~10 min) over the Gironde."""
+    import io as _io
+    import zipfile
+    import tempfile
+    import urllib.parse
+    tok = _eum_token()
+    if not tok:
+        return None
+    h = {'Authorization': 'Bearer ' + tok}
+    coll = 'EO:EUM:DAT:0682'
+    s = requests.get('https://api.eumetsat.int/data/search-products/1.0.0/os',
+                     params={'format': 'json', 'pi': coll, 'c': 1, 'si': 0},
+                     headers=h, timeout=20)
+    feats = s.json().get('features', []) if s.status_code == 200 else []
+    if not feats:
+        return None
+    pid = feats[0]['id']
+    tstr = (feats[0].get('properties', {}).get('date') or '')
+    url = ('https://api.eumetsat.int/data/download/1.0.0/collections/'
+           'EO%3AEUM%3ADAT%3A0682/products/' + urllib.parse.quote(pid, safe=''))
+    z = requests.get(url, headers=h, timeout=90)
+    if z.status_code != 200:
+        return None
+    zf = zipfile.ZipFile(_io.BytesIO(z.content))
+    ncname = next((n for n in zf.namelist() if n.endswith('.nc')), None)
+    if not ncname:
+        return None
+    with tempfile.NamedTemporaryFile(suffix='.nc', delete=False) as tf:
+        tf.write(zf.read(ncname))
+        path = tf.name
+    try:
+        import netCDF4
+        import numpy as _np
+        from pyproj import Proj
+        ds = netCDF4.Dataset(path)
+        x = ds.variables['x'][:]
+        y = ds.variables['y'][:]
+        fr = ds.variables['fire_result'][:]
+        ds.close()
+        H = 35786400.0
+        P = Proj(proj='geos', h=H, a=6378137.0, b=6356752.0, lon_0=0, sweep='y')
+        rows, cols = _np.where((fr >= 1) & (fr <= 3))
+        fires = []
+        for r, c in zip(rows.tolist(), cols.tolist()):
+            lo, la = P(float(x[c]) * H, float(y[r]) * H, inverse=True)
+            if -1.6 <= lo <= -0.3 and 44.3 <= la <= 45.4:
+                fires.append({'lat': round(float(la), 4), 'lon': round(float(lo), 4),
+                              'level': int(fr[r, c])})
+        end = tstr.split('/')[-1] if tstr else None
+        return {'fires': fires, 'time': end, 'n_world': int(len(rows))}
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+@app.route('/api/meteosat')
+def api_meteosat():
+    """Near-real-time (~10 min) geostationary fire pixels over the Gironde."""
+    data = _cached('meteosat', 480, fetch_meteosat_fire)
+    if data is None:
+        return jsonify({'fires': [], 'time': None, 'available': False})
+    return jsonify({**data, 'available': True})
+
+
 @app.route('/api/aircraft-history')
 def api_aircraft_history():
     """Recorded water-bomber positions (built by the host logger) for replay."""
