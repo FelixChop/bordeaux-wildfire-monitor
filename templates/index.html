@@ -193,7 +193,13 @@
       <div class="views" id="views" style="grid-template-columns:1fr 1fr 1fr">
         <b data-v="ref" class="on">🎯 Référence</b>
         <b data-v="pess">⚠️ Pessimiste</b>
-        <b data-v="pyro">🌩️ Si pyroCb</b>
+        <b data-v="pyro">🌩️ Orage de feu</b>
+      </div>
+      <div class="dash-note" style="margin-top:2px">
+        🎯 l'évolution la plus probable · ⚠️ si la météo tourne mal (pire tirage sur 10) ·
+        🌩️ si l'incendie déclenche son propre orage — un <b>pyrocumulonimbus</b> : colonne de fumée
+        si puissante qu'elle crée un orage au-dessus du feu, avec vents chaotiques et pluies de
+        braises (probabilité estimée : <b id="pyroProba">~40 %</b> sur 7 jours)
       </div>
       <div class="views" style="grid-template-columns:1fr">
         <b onclick="randomMember()" id="randBtn">🎲 Tirage aléatoire (1 des 12 simulations)</b>
@@ -300,6 +306,8 @@ async function boot(){
     ]);
     state.data=data; state.wind=wind; state.meteo=meteo;
     state.past=past; state.sim=sim; state.airField=airF;
+    if(sim.pyro_runs!=null&&sim.n_runs)
+      setTimeout(()=>{const e=$('pyroProba');if(e)e.textContent=Math.round(sim.pyro_runs/sim.n_runs*100)+' %';},0);
     state.airIdx={};
     if(airF&&airF.times) airF.times.forEach((t,k)=>{state.airIdx[t.slice(0,13)]=k;});
     initDash();
@@ -442,6 +450,8 @@ async function setView(v){
     const sim=await getJSON('/api/scenario?view='+v+'&lutte='+state.lutte, 40);
     state.sim=sim;
     state.scen.pyro=(v==='pyro'||sim.member_pyro)?'high':'low';
+    if(sim.pyro_runs!=null&&sim.n_runs)
+      $('pyroProba').textContent=Math.round(sim.pyro_runs/sim.n_runs*100)+' %';
     if($('menu').style.display!=='none') toggleMenu();
     const keep=state.idx;
     buildTimeline();
