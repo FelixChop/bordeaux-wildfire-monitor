@@ -306,6 +306,40 @@ def fetch_air_quality():
         return None
 
 
+def fetch_pyro_watch(lat, lon, hotspots):
+    """Real-time pyroCumulonimbus watch over the fire zone.
+
+    Combines OBSERVED data: WMO weather code at the fire (95/96/99 = orage
+    détecté), CAPE (convective energy available), and the fire's real
+    intensity (sum of FRP over the last 24 h). A pyroCb is an episodic
+    thunderstorm lasting hours — it needs an intense convective column."""
+    try:
+        r = requests.get('https://api.open-meteo.com/v1/forecast', params={
+            'latitude': lat, 'longitude': lon,
+            'current': 'cape,weather_code', 'timezone': 'UTC'}, timeout=15)
+        cur = r.json().get('current', {}) if r.status_code == 200 else {}
+        cape = float(cur.get('cape') or 0)
+        wcode = int(cur.get('weather_code') or 0)
+        now = datetime.utcnow()
+        frp24 = sum(h.get('frp', 0) for h in hotspots
+                    if _parse_ts(h.get('timestamp'))
+                    and (now - _parse_ts(h['timestamp'])) <= timedelta(hours=24))
+        storm_here = wcode in (95, 96, 99)
+        if storm_here and frp24 > 500:
+            status, lvl = 'ORAGE OBSERVÉ sur la zone du feu', 'fire'
+        elif frp24 < 300:
+            status, lvl = 'improbable — feu en fort déclin', 'ok'
+        elif cape > 1000 and frp24 > 2000:
+            status, lvl = 'conditions favorables (convection + feu intense)', 'warn'
+        else:
+            status, lvl = 'peu probable actuellement', 'ok'
+        return {'status': status, 'level': lvl, 'cape': round(cape),
+                'storm_observed': storm_here, 'frp24': round(frp24)}
+    except Exception as e:
+        print(f"pyro watch error: {e}")
+        return None
+
+
 def update_data():
     """Background thread: fetch latest data periodically."""
     global latest_data, last_update, _wind_field
@@ -347,6 +381,8 @@ def update_data():
                 'firms': firms,
                 'wind': wind,
                 'air': fetch_air_quality(),
+                'pyro_watch': fetch_pyro_watch(centroid_lat, centroid_lon,
+                                               firms['hotspots']),
             }
 
             last_update = datetime.utcnow()

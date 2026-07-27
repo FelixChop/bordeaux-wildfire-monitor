@@ -193,14 +193,15 @@
       <div class="views" id="views" style="grid-template-columns:1fr 1fr 1fr">
         <b data-v="ref" class="on">🎯 Référence</b>
         <b data-v="pess">⚠️ Pessimiste</b>
-        <b data-v="pyro">🌩️ Nouvel orage de feu</b>
+        <b data-v="pyro">🌩️ Orage de feu</b>
       </div>
       <div class="dash-note" style="margin-top:2px">
         🎯 l'évolution la plus probable · ⚠️ si la météo tourne mal (pire tirage sur 10) ·
-        🌩️ si le feu déclenche un <b>NOUVEL</b> orage de feu (pyrocumulonimbus : la colonne de fumée
-        crée son propre orage → vents chaotiques, pluies de braises — comme il a pu s'en produire au
-        paroxysme des derniers jours). La probabilité dépend de l'intensité simulée du feu :
-        <b id="pyroProba">—</b> sur 7 jours ; un feu qui s'éteint n'en produit plus.
+        🌩️ scénarios où le feu produit des <b>épisodes</b> d'orage de feu (pyrocumulonimbus). Un pyroCb
+        est un orage créé par la colonne de fumée : il dure quelques heures puis s'effondre, et se
+        reforme tant que le feu est assez intense — l'état <b>temps réel</b> est affiché dans
+        « Situation ». Probabilité d'épisodes sur les 7 prochains jours simulés :
+        <b id="pyroProba">—</b> (liée à l'intensité du feu simulé).
       </div>
       <div class="views" style="grid-template-columns:1fr">
         <b onclick="randomMember()" id="randBtn">🎲 Tirage aléatoire (1 des 12 simulations)</b>
@@ -344,6 +345,7 @@ function renderStats(){
     <div class="stat ${away?'ok':'warn'}"><div class="l">⚠️ Risque Bordeaux</div><div class="v">${away?'Faible':'À surveiller'}</div></div>
     <div class="stat" style="grid-column:1/-1"><div class="l">🛰️ Dernier passage satellite (foyers précis)</div><div class="v">${lastDet?fmtT(lastDet)+' ('+ago(lastDet)+')':'—'}</div></div>
     ${meteoTile(state.meteo)}
+    ${pyroTile(d.pyro_watch)}
     ${airTile(d.air)}`;
   $('src').innerHTML=`Foyers : NASA FIRMS ${sats?'('+sats+')':''} · Météo : Open-Meteo · Végétation : NDVI MODIS<br>Surveillance actualisée chaque heure · dernière vérif : ${fmtT(d.timestamp+'Z')}`;
 }
@@ -365,6 +367,12 @@ function meteoTile(m){
   return `<div class="stat ${cls}" style="grid-column:1/-1"><div class="l">🔥 Détection géostationnaire (~10 min)</div>`+
     `<div class="v">${m.time?ago(m.time):'—'}${n>0?' · '+n+' point(s) feu Gironde':' · rien sur zone'}</div>`+
     `<div class="l" style="margin-top:3px">Meteosat MTG — comble les 2 passages/jour</div></div>`;
+}
+function pyroTile(p){
+  if(!p) return '';
+  return `<div class="stat ${p.level}" style="grid-column:1/-1"><div class="l">🌩️ Orage de feu (pyroCb) — temps réel</div>`+
+    `<div class="v">${p.status}</div>`+
+    `<div class="l" style="margin-top:3px">CAPE ${p.cape} J/kg · intensité feu 24 h : ${p.frp24} MW${p.storm_observed?' · ⚡ orage au-dessus de la zone':''}</div></div>`;
 }
 function airTile(air){
   if(!air) return '';
