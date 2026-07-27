@@ -87,6 +87,8 @@
     @media(min-width:820px){.layers{top:110px}}
     .leaflet-bottom.leaflet-left{bottom:calc(var(--tl-h) + 4px)}
     .legend{background:rgba(0,0,0,.6);border-radius:8px;padding:6px 9px;font-size:11px;line-height:1.7;color:#eee}
+    .aclabel{background:rgba(2,119,189,.9)!important;border:none!important;color:#fff!important;font-weight:700;font-size:10.5px;padding:2px 6px!important;border-radius:6px!important;box-shadow:0 1px 4px #000}
+    .aclabel:before{display:none!important}
     .legend i{display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:6px;vertical-align:-1px}
 
     /* ---- desktop ---- */
@@ -351,10 +353,14 @@ const LYR={
   traffic :{btn:'trafBtn',layer:L.layerGroup(), url:'/api/traffic',  refresh:90, draw:drawTraffic},
   aircraft:{btn:'airBtn', layer:L.layerGroup(), url:'/api/aircraft', refresh:45, draw:drawAircraft},
 };
-async function loadLayer(name){
+async function loadLayer(name,fit){
   const L0=LYR[name];
-  try{ const data=await fetch(L0.url).then(r=>r.json()); L0.layer.clearLayers(); L0.draw(data,L0.layer); }
-  catch(e){}
+  try{
+    const data=await fetch(L0.url).then(r=>r.json());
+    L0.layer.clearLayers();
+    const bounds=L0.draw(data,L0.layer);
+    if(fit&&bounds&&bounds.isValid&&bounds.isValid()){ bounds.extend(BDX); map.fitBounds(bounds,{padding:[60,60],maxZoom:11}); }
+  }catch(e){}
 }
 function toggleLayer(name){
   const L0=LYR[name], btn=$(L0.btn);
@@ -362,7 +368,7 @@ function toggleLayer(name){
     map.removeLayer(L0.layer); btn.classList.remove('on');
     if(L0.timer){clearInterval(L0.timer);L0.timer=null;}
   }else{
-    L0.layer.addTo(map); btn.classList.add('on'); loadLayer(name);
+    L0.layer.addTo(map); btn.classList.add('on'); loadLayer(name, name==='aircraft');
     if(L0.refresh) L0.timer=setInterval(()=>loadLayer(name), L0.refresh*1000);
   }
 }
@@ -389,16 +395,22 @@ function drawAircraft(d,layer){
   const air=d.aircraft||[];
   if(!air.length){
     L.tooltip({permanent:true,direction:'center',className:'noair'})
-      .setLatLng([44.6,-0.9]).setContent('Aucun bombardier en vol').addTo(layer);
-    return;
+      .setLatLng([44.6,-0.9]).setContent('Aucun bombardier en vol en France').addTo(layer);
+    return null;
   }
+  const pts=[];
   air.forEach(a=>{
-    const rot=(a.heading||0);
-    const col=a.fire?'#d50000':'#0277bd';
-    const ic=L.divIcon({className:'',iconSize:[24,24],
-      html:`<div style="transform:rotate(${rot}deg);color:${col};font-size:20px;filter:drop-shadow(0 1px 2px #000)">✈️</div>`});
-    L.marker([a.lat,a.lon],{icon:ic}).bindTooltip(`${a.callsign}${a.alt?' · '+a.alt+' m':''}`).addTo(layer);
+    if(a.track&&a.track.length>1){
+      L.polyline(a.track,{color:'#0277bd',weight:3,opacity:.8,dashArray:'4,4'}).addTo(layer);
+      a.track.forEach(p=>pts.push(p));
+    }
+    pts.push([a.lat,a.lon]);
+    const ic=L.divIcon({className:'',iconSize:[26,26],
+      html:`<div style="transform:rotate(${a.heading||0}deg);font-size:20px;filter:drop-shadow(0 1px 2px #000)">✈️</div>`});
+    L.marker([a.lat,a.lon],{icon:ic,zIndexOffset:1000})
+      .bindTooltip(`${a.callsign}${a.alt!=null?' · '+a.alt+' m':''}`,{permanent:true,direction:'top',className:'aclabel'}).addTo(layer);
   });
+  return pts.length?L.latLngBounds(pts):null;
 }
 function log(){}  // placeholder (no-op narrator)
 

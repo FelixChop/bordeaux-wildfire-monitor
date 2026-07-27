@@ -772,33 +772,51 @@ def api_traffic():
     return jsonify(data)
 
 
+# French aerial firefighting call signs (Sécurité Civile + military reinforcement)
+_FIRE_KW = ('PELICAN', 'PELIC', 'MILAN', 'DRAGON', 'CANADAIR', 'FIRE', 'BOMB',
+            'COTAM', 'FRAF', 'A400', 'FENNEC')
+
+
+def _opensky_track(icao24):
+    """Recent trajectory [[lat,lon],...] of an aircraft (OpenSky tracks API)."""
+    try:
+        r = requests.get("https://opensky-network.org/api/tracks/all",
+                         params={'icao24': icao24, 'time': 0}, timeout=15)
+        if r.status_code != 200:
+            return []
+        return [[round(p[1], 4), round(p[2], 4)] for p in (r.json().get('path') or [])
+                if p[1] is not None and p[2] is not None]
+    except Exception:
+        return []
+
+
 @app.route('/api/aircraft')
 def api_aircraft():
-    """Low-flying aircraft (OpenSky ADS-B) — water bombers when a fire is active."""
+    """Firefighting aircraft over France (OpenSky ADS-B), with recent tracks."""
     def prod():
+        # whole of France so bombers are caught wherever the fire is
         r = requests.get("https://opensky-network.org/api/states/all",
-                         params={'lamin': 44.2, 'lomin': -1.7,
-                                 'lamax': 45.5, 'lomax': -0.2}, timeout=15)
+                         params={'lamin': 41.0, 'lomin': -5.5,
+                                 'lamax': 51.5, 'lomax': 10.0}, timeout=20)
         if r.status_code != 200:
             return None
-        fire_kw = ('PELICAN', 'PELIC', 'MILAN', 'FIRE', 'DRAGON', 'CANADAIR', 'BOMB')
         out = []
         for s in r.json().get('states') or []:
             cs = (s[1] or '').strip()
-            lon, lat, baro, vel, trk, geo = s[5], s[6], s[7], s[9], s[10], s[13]
+            icao = s[0]
+            lon, lat, baro, trk, geo = s[5], s[6], s[7], s[10], s[13]
             if lat is None or lon is None:
                 continue
             alt = baro if baro is not None else geo
-            is_fire = any(k in cs.upper() for k in fire_kw)
-            # exclude airliners around Bordeaux-Mérignac airport (44.83, -0.70)
-            near_airport = ((lat - 44.83) ** 2 + (lon + 0.70) ** 2) ** 0.5 < 0.14
-            low_working = (alt is not None and alt < 1800 and not near_airport)
-            if is_fire or low_working:
-                out.append({'callsign': cs or '—', 'lat': lat, 'lon': lon,
-                            'alt': round(alt) if alt is not None else None,
-                            'heading': trk, 'fire': is_fire})
+            is_fire = any(k in cs.upper() for k in _FIRE_KW)
+            if not is_fire:
+                continue  # only confirmed firefighting call signs
+            out.append({'callsign': cs or '—', 'icao24': icao, 'lat': lat, 'lon': lon,
+                        'alt': round(alt) if alt is not None else None,
+                        'heading': trk, 'fire': True,
+                        'track': _opensky_track(icao)})
         return out
-    return jsonify({'aircraft': _cached('aircraft', 45, prod) or []})
+    return jsonify({'aircraft': _cached('aircraft', 60, prod) or []})
 
 
 def _eum_token():
