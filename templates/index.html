@@ -318,7 +318,8 @@ function renderSim(i){
   $('tlTime').textContent=fmtT(f.timestamp);
   const j=Math.floor((f.hour||0)/24);
   const day=j>0?` · J+${j}`:'';
-  $('tlInfo').textContent=`${(f.area_ha||0).toLocaleString('fr-FR')} ha${day} · vent ${f.wind_speed_ms} m/s · ${f.humidity_pct}% hum.`;
+  const tmp=(f.temp_c!=null)?` · ${f.temp_c}°C`:'';
+  $('tlInfo').textContent=`${(f.area_ha||0).toLocaleString('fr-FR')} ha${day} · vent ${f.wind_speed_ms} m/s · ${f.humidity_pct}% hum.${tmp}`;
 }
 
 function togglePlay(){ state.playing?stop():play(); }

@@ -179,7 +179,7 @@ def fetch_wind_field(n=6, hours=192):
         r = requests.get("https://api.open-meteo.com/v1/forecast", params={
             'latitude': ','.join(map(str, lats_q)),
             'longitude': ','.join(map(str, lons_q)),
-            'hourly': 'wind_speed_10m,wind_direction_10m,relative_humidity_2m',
+            'hourly': 'wind_speed_10m,wind_direction_10m,relative_humidity_2m,temperature_2m',
             'forecast_days': 8, 'timezone': 'UTC',
         }, timeout=20)
         if r.status_code != 200:
@@ -192,6 +192,7 @@ def fetch_wind_field(n=6, hours=192):
         speed = np.zeros((len(times), n, n))
         wdir = np.zeros((len(times), n, n))
         rh = np.zeros((len(times), n, n))
+        temp = np.zeros((len(times), n, n))
         for idx, res in enumerate(results):
             i, j = idx // n, idx % n
             h = res.get('hourly', {})
@@ -199,11 +200,12 @@ def fetch_wind_field(n=6, hours=192):
                 speed[t, i, j] = (h.get('wind_speed_10m') or [0])[t] or 0
                 wdir[t, i, j] = (h.get('wind_direction_10m') or [270])[t] or 270
                 rh[t, i, j] = (h.get('relative_humidity_2m') or [50])[t] or 50
+                temp[t, i, j] = (h.get('temperature_2m') or [25])[t] or 25
         return {
             'grid_lats': [round(float(x), 4) for x in grid_lats],
             'grid_lons': [round(float(x), 4) for x in grid_lons],
             'times': times,
-            'speed': speed, 'dir': wdir, 'rh': rh,
+            'speed': speed, 'dir': wdir, 'rh': rh, 'temp': temp,
         }
     except Exception as e:
         print(f"Wind field fetch error: {e}")
@@ -492,6 +494,7 @@ def compute_simulation():
                 'speed': _wind_field['speed'][idx],
                 'dir': _wind_field['dir'][idx],
                 'rh': _wind_field['rh'][idx],
+                'temp': _wind_field['temp'][idx],
             }
         else:
             wf = _wind_field

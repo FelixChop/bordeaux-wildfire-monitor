@@ -41,10 +41,18 @@ _NEIGHBOURS = [(-1, 0), (1, 0), (0, -1), (0, 1),
                (-1, -1), (-1, 1), (1, -1), (1, 1)]
 
 
-def _ros_grid(speed, rh, fuel):
-    """Per-cell head-fire ROS [m/min]: wind law * humidity dryness * fuel."""
+def _ros_grid(speed, rh, fuel, temp=None):
+    """Per-cell head-fire ROS [m/min]: wind law * dryness(humidity,temp) * fuel.
+
+    Hotter air pre-heats and dries the fuel, so the fire spreads faster: a
+    simple linear temperature factor around 25 °C (≈ +4 %/°C above, capped
+    0.6–1.6) modulates the rate, on top of the humidity dryness term.
+    """
     base = _CAL * np.power(np.clip(speed, 0, None), _EXP)
     dryness = np.clip(1.3 - rh / 55.0, 0.08, 1.3)
+    if temp is not None:
+        temp_factor = np.clip(1.0 + 0.04 * (temp - 25.0), 0.6, 1.6)
+        dryness = dryness * temp_factor
     return np.clip(base * dryness * fuel, 0.0, _ROS_CAP)
 
 
@@ -126,6 +134,7 @@ def simulate_fire_front(hotspots, wind_records, wind_field=None,
         speed_hrs, dir_hrs, rh_hrs = (np.asarray(wind_field['speed']),
                                       np.asarray(wind_field['dir']),
                                       np.asarray(wind_field['rh']))
+        temp_hrs = np.asarray(wind_field['temp']) if wind_field.get('temp') is not None else None
         n_hours = min(max_hours, len(times))
     else:
         # fall back to a single-point series broadcast over the domain
@@ -173,6 +182,7 @@ def simulate_fire_front(hotspots, wind_records, wind_field=None,
             pe = _interp_hour(-np.sin(np.radians(dir_hrs[h])))  # propagation east
             pn = _interp_hour(-np.cos(np.radians(dir_hrs[h])))  # propagation north
             rh = _interp_hour(rh_hrs[h])
+            temp = _interp_hour(temp_hrs[h]) if temp_hrs is not None else None
             ts = times[h]
         else:
             rec = wind_records[h]
@@ -182,13 +192,15 @@ def simulate_fire_front(hotspots, wind_records, wind_field=None,
             pe = np.full((nrows, ncols), -np.sin(np.radians(wf)))
             pn = np.full((nrows, ncols), -np.cos(np.radians(wf)))
             rh = np.full((nrows, ncols), float(rec.get('relative_humidity_pct') or 50.0))
+            t = rec.get('temperature_c')
+            temp = np.full((nrows, ncols), float(t)) if t is not None else None
             ts = rec.get('timestamp')
 
         # normalise propagation direction
         pmag = np.hypot(pe, pn) + 1e-9
         pe_u, pn_u = pe / pmag, pn / pmag
 
-        ros = _ros_grid(speed, rh, fuel_grid)
+        ros = _ros_grid(speed, rh, fuel_grid, temp)
         residual += ros * 60.0
 
         # directed sub-cell propagation, respecting local wind + fuel
@@ -217,11 +229,14 @@ def simulate_fire_front(hotspots, wind_records, wind_field=None,
         burning_mask = burned
         mean_speed = float(speed[burning_mask].mean()) if burning_mask.any() else 0.0
         mean_rh = float(rh[burning_mask].mean()) if burning_mask.any() else 0.0
+        mean_temp = (float(temp[burning_mask].mean())
+                     if (temp is not None and burning_mask.any()) else None)
         frames.append({
             'hour': h,
             'timestamp': ts,
             'wind_speed_ms': round(mean_speed, 1),
             'humidity_pct': round(mean_rh),
+            'temp_c': round(mean_temp) if mean_temp is not None else None,
             'area_ha': round(float(burned.sum() * cell_area_ha)),
             'polygons': _isochrone(burned),
         })
