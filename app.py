@@ -14,7 +14,7 @@ from pathlib import Path
 from threading import Thread
 import time
 
-from flask import Flask, render_template, jsonify, Response
+from flask import Flask, render_template, jsonify, Response, request
 import requests
 
 # Imports from local modules
@@ -179,7 +179,8 @@ def fetch_wind_field(n=6, hours=312):  # 5 past days + 8 forecast days
         r = requests.get("https://api.open-meteo.com/v1/forecast", params={
             'latitude': ','.join(map(str, lats_q)),
             'longitude': ','.join(map(str, lons_q)),
-            'hourly': 'wind_speed_10m,wind_direction_10m,relative_humidity_2m,temperature_2m',
+            'hourly': 'wind_speed_10m,wind_direction_10m,relative_humidity_2m,'
+                      'temperature_2m,soil_moisture_0_to_7cm',
             'past_days': 5, 'forecast_days': 8, 'timezone': 'UTC',
         }, timeout=20)
         if r.status_code != 200:
@@ -193,6 +194,7 @@ def fetch_wind_field(n=6, hours=312):  # 5 past days + 8 forecast days
         wdir = np.zeros((len(times), n, n))
         rh = np.zeros((len(times), n, n))
         temp = np.zeros((len(times), n, n))
+        soil = np.zeros((len(times), n, n))
         for idx, res in enumerate(results):
             i, j = idx // n, idx % n
             h = res.get('hourly', {})
@@ -201,11 +203,13 @@ def fetch_wind_field(n=6, hours=312):  # 5 past days + 8 forecast days
                 wdir[t, i, j] = (h.get('wind_direction_10m') or [270])[t] or 270
                 rh[t, i, j] = (h.get('relative_humidity_2m') or [50])[t] or 50
                 temp[t, i, j] = (h.get('temperature_2m') or [25])[t] or 25
+                sv = (h.get('soil_moisture_0_to_7cm') or [0.2])[t]
+                soil[t, i, j] = 0.2 if sv is None else sv
         return {
             'grid_lats': [round(float(x), 4) for x in grid_lats],
             'grid_lons': [round(float(x), 4) for x in grid_lons],
             'times': times,
-            'speed': speed, 'dir': wdir, 'rh': rh, 'temp': temp,
+            'speed': speed, 'dir': wdir, 'rh': rh, 'temp': temp, 'soil': soil,
         }
     except Exception as e:
         print(f"Wind field fetch error: {e}")
@@ -492,16 +496,25 @@ def api_fire_history():
 
 
 _sim_cache = {'key': None, 'data': None}
+_sim_lock = __import__('threading').Lock()
 
 
 def compute_simulation():
-    """Build (and cache) the 7-day propagation from the current data."""
+    """Build (and cache) the 7-day Monte-Carlo ensemble from current data."""
     if not latest_data:
         return None
-    from src.fire_front import simulate_fire_front
-    hotspots = latest_data['firms'].get('hotspots', [])
+    from src.fire_front import simulate_monte_carlo
+    now_dt = datetime.utcnow()
+    # Seed ONLY the currently active fires (recent detections), not 5 days of
+    # mostly-extinct history.
+    active = []
+    for h in latest_data['firms'].get('hotspots', []):
+        dt = _parse_ts(h.get('timestamp'))
+        if dt and (now_dt - dt) <= timedelta(hours=ACTIVE_WINDOW_H):
+            active.append(h)
+    hotspots = active
     wind = latest_data['wind'].get('hourly_wind', [])
-    now_key = datetime.utcnow().strftime('%Y-%m-%dT%H:00')
+    now_key = now_dt.strftime('%Y-%m-%dT%H:00')
     future = [w for w in wind if (w.get('timestamp') or '') >= now_key]
     wind = future if future else wind
 
@@ -517,26 +530,50 @@ def compute_simulation():
                 'dir': _wind_field['dir'][idx],
                 'rh': _wind_field['rh'][idx],
                 'temp': _wind_field['temp'][idx],
+                'soil': (_wind_field['soil'][idx]
+                         if _wind_field.get('soil') is not None else None),
             }
         else:
             wf = _wind_field
     fuel = _veg_cache.get('fuel')
 
-    key = f"{last_update}:{len(hotspots)}:{now_key}:{wf is not None}:{fuel is not None}:168"
-    if _sim_cache['key'] != key:
-        _sim_cache['data'] = simulate_fire_front(
-            hotspots, wind, wind_field=wf, veg_fuel=fuel, veg_bbox=SIM_BBOX,
-            max_hours=168, emit_every=3)  # 7 days, one frame every 3 h
+    key = f"{last_update}:{len(hotspots)}:{now_key}:{wf is not None}:{fuel is not None}:mc2"
+    if _sim_cache['key'] == key:
+        return _sim_cache['data']
+    # Only ONE thread computes the ensembles; others get the previous result.
+    if not _sim_lock.acquire(blocking=False):
+        return _sim_cache['data']
+    try:
+        n_runs = int(os.getenv('MC_RUNS', '8'))
+        both = {}
+        for mode, supp in (('lutte', True), ('libre', False)):
+            data = simulate_monte_carlo(
+                hotspots, wind, wind_field=wf, veg_fuel=fuel, veg_bbox=SIM_BBOX,
+                max_hours=168, emit_every=3, n_runs=n_runs, suppression=supp)
+            # normalise timestamps to explicit UTC so the client renders the
+            # same local time as past frames (fixes the 12h/14h mismatch)
+            for f in data.get('frames', []):
+                ts = f.get('timestamp')
+                if ts and not ts.endswith('Z'):
+                    f['timestamp'] = ts + 'Z'
+            both[mode] = data
+        _sim_cache['data'] = both
         _sim_cache['key'] = key
+    finally:
+        _sim_lock.release()
     return _sim_cache['data']
 
 
 @app.route('/api/simulation')
 def api_simulation():
-    """Hour-by-hour multi-source fire propagation from every real hotspot."""
+    """Monte-Carlo ensemble forecast. ?mode=lutte (défaut) | libre."""
     if not latest_data:
         return jsonify({'error': 'No data available'}), 503
-    data = compute_simulation()
+    both = compute_simulation()
+    if not both:
+        return jsonify({'error': 'Computing'}), 503
+    mode = request.args.get('mode', 'lutte')
+    data = both.get(mode) or both.get('lutte')
     return jsonify(data if data is not None else {'error': 'No data'}), (200 if data else 503)
 
 
@@ -576,6 +613,7 @@ def api_windfield():
         'times': _wind_field['times'],
         'speed': np.asarray(_wind_field['speed']).round(1).tolist(),
         'dir': np.asarray(_wind_field['dir']).round(0).tolist(),
+        'temp': np.asarray(_wind_field['temp']).round(0).tolist(),
     })
 
 

@@ -123,9 +123,9 @@
   </div>
 
   <div class="layers">
-    <div class="lyr" id="vegBtn" onclick="toggleVeg()">🌲 Végétation</div>
     <div class="lyr" id="airqBtn" onclick="toggleAirQ()">🌫️ Qualité air</div>
     <div class="lyr" id="trafBtn" onclick="toggleLayer('traffic')">🚦 Trafic</div>
+    <div class="lyr on" id="suppBtn" onclick="toggleSupp()">🚒 Avec lutte</div>
   </div>
 
   <div class="panel collapsed" id="panel">
@@ -190,31 +190,24 @@ async function getJSON(url, tries=20){
 async function boot(){
   try{
     const data=await getJSON('/api/data');           // wait until data is warm
-    const [past,sim,wind,meteo]=await Promise.all([
+    const [past,simLutte,simLibre,wind,meteo]=await Promise.all([
       getJSON('/api/fire-history'),
-      getJSON('/api/simulation'),
+      getJSON('/api/simulation?mode=lutte',60),
+      getJSON('/api/simulation?mode=libre',60),
       getJSON('/api/windfield').catch(()=>null),
       fetch('/api/meteosat').then(r=>r.json()).catch(()=>null)
     ]);
     state.data=data; state.wind=wind; state.meteo=meteo;
+    state.past=past; state.sims={lutte:simLutte,libre:simLibre}; state.simMode='lutte';
     // wind lookup by hour-timestamp (covers past 5 d + forecast 8 d)
     state.windIdx={};
     if(wind&&wind.times) wind.times.forEach((t,k)=>{state.windIdx[t.slice(0,13)]=k;});
     // compact fire points + window
     state.firePts=past.points||[]; state.winH=past.window_h||24;
-    // Unified timeline: 5 days of past hours then 7 days of forecast.
-    const startMs=Date.parse(past.start);
-    const pf=[]; for(let k=0;k<past.n_hours;k++)
-      pf.push({kind:'past',hIdx:k,timestamp:new Date(startMs+k*3600e3).toISOString().slice(0,16)+'Z'});
-    const sf=(sim.frames||[]).map(f=>({kind:'sim',...f}));
-    state.frames=pf.concat(sf);
-    state.nowIdx=Math.max(pf.length-1,0);   // last past frame = "now"
-    const sl=$('slider'); sl.min=0; sl.max=Math.max(state.frames.length-1,0);
-    document.documentElement.style.setProperty('--nowpct',
-      (state.nowIdx/Math.max(state.frames.length-1,1)*100)+'%');
+    buildTimeline();
     renderStats();
     lockView();
-    toggleVeg();          // vegetation always on by default
+    addVeg();             // vegetation base layer, always on
     goLive();             // start at the present
     $('loading').classList.add('hide');
   }catch(e){ $('loading').innerHTML='<div>Erreur de chargement.<br><small>'+e+'</small></div>'; }
@@ -267,6 +260,28 @@ function airTile(air){
     `<div class="l" style="margin-top:4px">PM2.5 ${fmt(air.pm2_5)} · PM10 ${fmt(air.pm10)} · CO ${fmt(air.co)} µg/m³</div></div>`;
 }
 
+function buildTimeline(){
+  const past=state.past, sim=state.sims[state.simMode]||{frames:[]};
+  const startMs=Date.parse(past.start);
+  const pf=[]; for(let k=0;k<past.n_hours;k++)
+    pf.push({kind:'past',hIdx:k,timestamp:new Date(startMs+k*3600e3).toISOString().slice(0,16)+'Z'});
+  const sf=(sim.frames||[]).map(f=>({kind:'sim',...f}));
+  state.frames=pf.concat(sf);
+  state.nowIdx=Math.max(pf.length-1,0);
+  state.simPts=[];
+  sf.forEach(g=>(g.new_points||[]).forEach(q=>state.simPts.push({lat:q[0],lon:q[1],h:q[2]})));
+  const sl=$('slider'); sl.min=0; sl.max=Math.max(state.frames.length-1,0);
+  document.documentElement.style.setProperty('--nowpct',
+    (state.nowIdx/Math.max(state.frames.length-1,1)*100)+'%');
+}
+function toggleSupp(){
+  state.simMode=(state.simMode==='lutte')?'libre':'lutte';
+  $('suppBtn').classList.toggle('on', state.simMode==='lutte');
+  $('suppBtn').textContent=(state.simMode==='lutte')?'🚒 Avec lutte':'🔥 Feu libre';
+  const keep=Math.min(state.idx, state.frames.length-1);
+  buildTimeline();
+  render(Math.min(keep, +$('slider').max));
+}
 function onSlide(v){ if(state.playing) stop(); render(+v); }
 function render(i){
   i=Math.max(0,Math.min(i, +$('slider').max)); state.idx=i; $('slider').value=i;
@@ -277,23 +292,25 @@ function render(i){
 }
 function goLive(){ if(state.playing) stop(); render(state.nowIdx); }
 
-function windColor(s){ return s<5?'#4caf50':s<10?'#ffd54f':s<15?'#ff9800':'#ff3d00'; }
 function drawWindAt(ts){
   const w=state.wind; if(!w||!w.speed||!ts) return;
   const k=state.windIdx[ts.slice(0,13)]; if(k==null) return;
   for(let a=0;a<w.grid_lats.length;a++){
     for(let b=0;b<w.grid_lons.length;b++){
       const s=w.speed[k][a][b], dir=w.dir[k][a][b];
+      const t=(w.temp&&w.temp[k])?Math.round(w.temp[k][a][b]):null;
       const rot=(dir+90); // arrow ➤ points east by default; wind blows toward dir+180
-      const size=11+Math.min(s,20)*0.7;
-      const ic=L.divIcon({className:'wind-arrow',iconSize:[size,size],
-        html:`<div style="transform:rotate(${rot}deg);color:${windColor(s)};font-size:${size}px;line-height:${size}px;opacity:.9">➤</div>`});
+      const size=9+Math.min(s,22)*1.1;          // la TAILLE encode la force
+      const ic=L.divIcon({className:'wind-arrow',iconSize:[size,size+12],
+        html:`<div style="transform:rotate(${rot}deg);color:rgba(255,255,255,.78);font-size:${size}px;line-height:${size}px;text-shadow:0 1px 2px #000">➤</div>`+
+             (t!=null?`<div style="font-size:9px;color:#ddd;text-align:center;text-shadow:0 1px 2px #000;opacity:.8;margin-top:1px">${t}°</div>`:'')});
       L.marker([w.grid_lats[a],w.grid_lons[b]],{icon:ic,interactive:false,keyboard:false}).addTo(windLayer);
     }
   }
 }
 
-// age-based style: a hotspot is born bright hot, then dims to dark ember red.
+// age-based style: a hotspot is born bright hot, dims to dark ember red, then
+// leaves a permanent black scar (burned vegetation).
 function ageStyle(age,frp){
   const base=3+Math.min((frp||0)/18,6);
   if(age<2)  return {col:'#ffee58',op:.95,r:base+2};   // naissance : jaune vif
@@ -302,14 +319,24 @@ function ageStyle(age,frp){
   if(age<18) return {col:'#d32f2f',op:.55,r:base-1};   // décline
   return       {col:'#7f0000',op:.32,r:Math.max(base-2,2)}; // braise mourante
 }
+// simulated fire: same lifecycle, blue family
+function simStyle(age){
+  if(age<3)  return {col:'#4dd0ff',op:.95,r:5};
+  if(age<8)  return {col:'#29b6f6',op:.85,r:4};
+  if(age<16) return {col:'#0277bd',op:.65,r:4};
+  return       {col:'#01427a',op:.45,r:3};
+}
+const SCAR={col:'#141414',op:.55,r:3};   // végétation brûlée
+function drawPoint(p,st,layer){
+  L.circleMarker([p.lat,p.lon],{radius:st.r,color:st.col,weight:.5,
+    fillColor:st.col,fillOpacity:st.op}).addTo(layer);
+}
 function renderPastFrame(f,i){
   const win=state.winH, h=f.hIdx;
   (state.firePts||[]).forEach(p=>{
     const age=h-p.h;
-    if(age<0||age>=win) return;
-    const s=ageStyle(age,p.frp);
-    L.circleMarker([p.lat,p.lon],{radius:s.r,color:s.col,weight:.5,
-      fillColor:s.col,fillOpacity:s.op}).addTo(firePts);
+    if(age<0) return;
+    drawPoint(p, age<win?ageStyle(age,p.frp):SCAR, firePts);
   });
   // geostationary fire pixels (Meteosat, ~10 min) — only near "now"
   if(i>=state.nowIdx-2){
@@ -328,42 +355,28 @@ function renderPastFrame(f,i){
 }
 
 function renderSimFrame(f,i){
-  // Real hotspots keep dying out as simulated time advances (age keeps running).
-  const effH=state.nowIdx+(f.hour||0);
+  const H=f.hour||0;
+  // Real hotspots keep aging: embers die, then permanent black scars.
+  const effH=state.nowIdx+H;
   (state.firePts||[]).forEach(p=>{
     const age=effH-p.h;
-    if(age<0||age>=state.winH) return;
-    const s=ageStyle(age,p.frp);
-    L.circleMarker([p.lat,p.lon],{radius:s.r,color:s.col,weight:.5,
-      fillColor:s.col,fillOpacity:s.op*.9}).addTo(firePts);
+    if(age<0) return;
+    drawPoint(p, age<state.winH?ageStyle(age,p.frp):SCAR, firePts);
   });
-  // Simulated burn, mathematically stacked: the model's earlier isochrones
-  // (older burn) darken the core, the newest ring is the bright young front.
-  const simStart=state.nowIdx+1;
-  const pos=i-simStart;                       // index among sim frames
-  const layers=[
-    {off:0, fill:'#29b6f6', op:.38, stroke:true},   // front jeune (maintenant simulé)
-    {off:2, fill:'#0288d1', op:.42},                // ~6 h plus tôt
-    {off:5, fill:'#01579b', op:.48},                // ~15 h
-    {off:10,fill:'#003c8f', op:.52},                // ~30 h
-    {off:20,fill:'#0d2b57', op:.58},                // ~60 h : brûlé ancien
-  ];
-  layers.forEach(ly=>{
-    const g=state.frames[simStart+pos-ly.off];
-    if(!g||g.kind!=='sim') return;
-    (g.polygons||[]).forEach(poly=>{
-      L.polygon(poly,{color:ly.stroke?'#80deea':'transparent',
-        weight:ly.stroke?2:0,dashArray:ly.stroke?'6,4':null,
-        fillColor:ly.fill,fillOpacity:ly.op}).addTo(simLayer);
-    });
+  // Simulated ignitions: same point UI, blue lifecycle, then black scar too.
+  (state.simPts||[]).forEach(p=>{
+    const age=H-p.h;
+    if(age<0) return;
+    drawPoint(p, age<state.winH?simStyle(age):SCAR, simLayer);
   });
   drawWindAt(f.timestamp);
   const j=Math.floor((f.hour||0)/24);
   $('tlTime').textContent=`🔮 ${fmtT(f.timestamp)}`;
   $('tlTime').style.color='#4fc3f7';
-  const day=j>0?`J+${j} · `:'prévision · ';
-  const tmp=(f.temp_c!=null)?` · ${f.temp_c}°C`:'';
-  $('tlInfo').textContent=`${day}${(f.area_ha||0).toLocaleString('fr-FR')} ha · vent ${f.wind_speed_ms} m/s · ${f.humidity_pct}% hum.${tmp}`;
+  const day=(state.simMode==='lutte'?'🚒 ':'')+(j>0?`J+${j} · `:'prévision · ');
+  const tmp=(f.temp_c!=null)?` · air ${f.temp_c}°C`:'';
+  const rng=(f.area_p10!=null)?` (${Math.round(f.area_p10/1000)}k–${Math.round(f.area_p90/1000)}k)`:'';
+  $('tlInfo').textContent=`${day}${(f.area_ha||0).toLocaleString('fr-FR')} ha${rng} · vent ${f.wind_speed_ms} m/s · ${f.humidity_pct}%${tmp}`;
 }
 
 function togglePlay(){ state.playing?stop():play(); }
@@ -380,14 +393,12 @@ function stop(){ state.playing=false; $('play').textContent='▶'; if(state.time
 
 function togglePanel(){ $('panel').classList.toggle('collapsed'); }
 
+// vegetation base layer: ALWAYS on (no toggle) — burned scars darken it
 let vegOverlay=null;
-function toggleVeg(){
-  const btn=$('vegBtn');
-  if(vegOverlay){ map.removeLayer(vegOverlay); vegOverlay=null; btn.classList.remove('on'); return; }
+function addVeg(){
   // SIM_BBOX = lon[-1.5,-0.5] lat[44.5,45.2]
   vegOverlay=overlayWithRetry('/api/vegetation.png',[[44.5,-1.5],[45.2,-0.5]],
     {opacity:.6,interactive:false}).addTo(map);
-  btn.classList.add('on');
 }
 
 // ---- ground/response layers (stations, traffic, aircraft) ----
@@ -480,8 +491,8 @@ function log(){}  // placeholder (no-op narrator)
 
 const legend=L.control({position:'bottomleft'});
 legend.onAdd=function(){const d=L.DomUtil.create('div','legend');
-  d.innerHTML='<i style="background:#ffee58"></i>Foyer récent → <i style="background:#7f0000"></i>en extinction<br>'+
-    '<i style="background:#0288d1;border:1px dashed #4fc3f7"></i>Prévision (simulation)<br>'+
+  d.innerHTML='<i style="background:#ffee58"></i>Foyer réel → <i style="background:#7f0000"></i>éteint → <i style="background:#141414;border:1px solid #444"></i>brûlé<br>'+
+    '<i style="background:#4dd0ff"></i>Foyer simulé (prévision)<br>'+
     '<span style="color:#ffd54f">➤</span> vent (sens + force)';
   return d;};
 legend.addTo(map);
