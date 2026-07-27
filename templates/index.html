@@ -641,7 +641,7 @@ function renderSimFrame(f,i){
   $('tlTime').style.color='#4fc3f7';
   let vEmo={ref:'🎯',opt:'🙂',pess:'⚠️',pyro:'🌩️'}[state.view];
   if(!vEmo&&state.view.startsWith('m'))
-    vEmo=`🎲 #${+state.view.slice(1)+1}${state.sim&&state.sim.member_pyro?'⛈️':''}`;
+    vEmo=`🎲 #${+state.view.slice(1)+1}${state.sim&&state.sim.member_pyro?'🌩️':''}`;
   const day=(vEmo||'')+' '+(j>0?`J+${j} · `:'prévision · ');
   const lut={low:' · 🚒⁻ lutte réduite',high:' · 🚒⁺ lutte renforcée'}[state.lutte]||'';
   const tmp=((f.temp_c!=null)?` · air ${f.temp_c}°C`:'')+lut;
