@@ -124,7 +124,7 @@
 
   <div class="layers">
     <div class="lyr" id="vegBtn" onclick="toggleVeg()">🌲 Végétation</div>
-    <div class="lyr" id="airqBtn" onclick="toggleLayer('air')">🌫️ Qualité air</div>
+    <div class="lyr" id="airqBtn" onclick="toggleAirQ()">🌫️ Qualité air</div>
     <div class="lyr" id="trafBtn" onclick="toggleLayer('traffic')">🚦 Trafic</div>
   </div>
 
@@ -345,23 +345,24 @@ function toggleVeg(){
 
 // ---- ground/response layers (stations, traffic, aircraft) ----
 const LYR={
-  air     :{btn:'airqBtn',layer:L.layerGroup(), url:'/api/air-grid', refresh:1800, draw:drawAirGrid},
   traffic :{btn:'trafBtn',layer:L.layerGroup(), url:'/api/traffic',  refresh:90, draw:drawTraffic},
 };
-function aqiColor(a){
-  if(a==null) return '#888';
-  if(a<=20) return '#4caf50'; if(a<=40) return '#c0ca33';
-  if(a<=60) return '#ffb300'; if(a<=80) return '#fb8c00';
-  if(a<=100) return '#e53935'; return '#8e24aa';
-}
-function drawAirGrid(d,layer){
-  const pts=d.points||[]; const dla=(d.dlat||0.08)/2, dlo=(d.dlon||0.12)/2;
-  pts.forEach(p=>{
-    if(p.aqi==null&&p.pm25==null) return;
-    L.rectangle([[p.lat-dla,p.lon-dlo],[p.lat+dla,p.lon+dlo]],
-      {stroke:false,fillColor:aqiColor(p.aqi),fillOpacity:.35})
-      .bindTooltip(`Air : indice ${p.aqi!=null?Math.round(p.aqi):'—'} · PM2.5 ${p.pm25!=null?Math.round(p.pm25):'—'}`).addTo(layer);
-  });
+
+// smooth CAMS-based air-quality field (wind dispersion already modeled upstream)
+let airqOverlay=null, airqTimer=null;
+function toggleAirQ(){
+  const btn=$('airqBtn');
+  if(airqOverlay){
+    map.removeLayer(airqOverlay); airqOverlay=null; btn.classList.remove('on');
+    if(airqTimer){clearInterval(airqTimer);airqTimer=null;} return;
+  }
+  const add=()=>{
+    if(airqOverlay) map.removeLayer(airqOverlay);
+    airqOverlay=L.imageOverlay('/api/air-quality.png?t='+Date.now(),
+      [[44.45,-1.45],[45.20,-0.35]],{opacity:.8,interactive:false}).addTo(map);
+  };
+  add(); btn.classList.add('on');
+  airqTimer=setInterval(add, 1800*1000);
 }
 async function loadLayer(name,fit){
   const L0=LYR[name];

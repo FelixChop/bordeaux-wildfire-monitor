@@ -913,6 +913,75 @@ def api_meteosat():
     return jsonify({**data, 'available': True})
 
 
+@app.route('/api/air-quality.png')
+def api_air_quality_png():
+    """Smooth Windy-style air-quality field (EAQI), cubic-interpolated raster.
+
+    Source: Open-Meteo air quality = CAMS European model (~11 km), which
+    already integrates wind-driven dispersion and thermal mixing — the plume
+    shapes follow the wind. We sample a grid then upscale with cubic
+    interpolation + gaussian smoothing for continuous contours.
+    """
+    def prod():
+        n_lat, n_lon = 8, 10
+        lat0, lat1, lon0, lon1 = 44.45, 45.20, -1.45, -0.35
+        lats = np.linspace(lat0, lat1, n_lat)
+        lons = np.linspace(lon0, lon1, n_lon)
+        laq, loq = [], []
+        for la in lats:
+            for lo in lons:
+                laq.append(round(float(la), 3))
+                loq.append(round(float(lo), 3))
+        r = requests.get('https://air-quality-api.open-meteo.com/v1/air-quality', params={
+            'latitude': ','.join(map(str, laq)), 'longitude': ','.join(map(str, loq)),
+            'current': 'european_aqi', 'timezone': 'UTC'}, timeout=25)
+        if r.status_code != 200:
+            return None
+        res = r.json()
+        if isinstance(res, dict):
+            res = [res]
+        vals = np.full(n_lat * n_lon, np.nan)
+        for idx, x in enumerate(res[:n_lat * n_lon]):
+            v = x.get('current', {}).get('european_aqi')
+            if v is not None:
+                vals[idx] = float(v)
+        grid = vals.reshape(n_lat, n_lon)
+        if np.isnan(grid).all():
+            return None
+        # fill occasional missing points with the mean
+        grid = np.where(np.isnan(grid), np.nanmean(grid), grid)
+
+        from scipy.interpolate import RegularGridInterpolator
+        from scipy.ndimage import gaussian_filter
+        f = RegularGridInterpolator((lats, lons), grid, method='cubic')
+        fy = np.linspace(lat0, lat1, 320)
+        fx = np.linspace(lon0, lon1, 400)
+        YY, XX = np.meshgrid(fy, fx, indexing='ij')
+        fine = f(np.column_stack([YY.ravel(), XX.ravel()])).reshape(320, 400)
+        fine = gaussian_filter(fine, sigma=2.5)
+
+        import matplotlib.colors as mcolors
+        cmap = mcolors.LinearSegmentedColormap.from_list('aqi', [
+            (0.00, '#2e7d32'), (0.18, '#8bc34a'), (0.34, '#cddc39'),
+            (0.50, '#ffb300'), (0.66, '#fb8c00'), (0.82, '#e53935'),
+            (1.00, '#8e24aa')])
+        norm = np.clip(fine / 120.0, 0, 1)
+        rgba = cmap(norm)
+        rgba[..., 3] = np.clip(0.20 + norm * 0.65, 0.2, 0.8)
+        img = np.flipud(rgba)  # row 0 = north
+        import matplotlib.image as mpimg
+        buf = io.BytesIO()
+        mpimg.imsave(buf, img, format='png')
+        buf.seek(0)
+        return buf.read()
+
+    png = _cached('airpng', 1800, prod)
+    if png is None:
+        return jsonify({'error': 'No air data'}), 503
+    return Response(png, mimetype='image/png',
+                    headers={'Cache-Control': 'public, max-age=900'})
+
+
 @app.route('/api/air-grid')
 def api_air_grid():
     """Spatial air-quality grid (Open-Meteo) for a coloured-zone overlay."""
