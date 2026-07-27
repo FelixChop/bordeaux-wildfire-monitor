@@ -437,7 +437,11 @@ def _hour_bucket(ts):
         return None
 
 
-ACTIVE_WINDOW_H = 18  # a hotspot is shown "active" for this many hours
+# A hotspot counts as "active" for this many hours. 24 h guarantees the window
+# always spans at least one daytime AND one nighttime satellite pass — night
+# passes detect far fewer pixels (fires calm down at night), so a shorter
+# window made the current activity look artificially tiny.
+ACTIVE_WINDOW_H = 24
 
 
 def _parse_ts(ts):
