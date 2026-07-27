@@ -189,19 +189,18 @@
   <div class="menu" id="menu" style="display:none">
     <div class="menu-head"><span>🔥 Incendie Bordeaux</span><b onclick="toggleMenu()">✕</b></div>
     <div class="menu-body">
-      <h3>🎛️ Scénarios de simulation <span class="mh-sub">(ensemble de 12 tirages)</span></h3>
-      <div class="views" id="views">
+      <h3>🎛️ Scénarios de simulation <span class="mh-sub">(ensemble de 16 tirages)</span></h3>
+      <div class="views" id="views" style="grid-template-columns:1fr 1fr 1fr">
         <b data-v="ref" class="on">🎯 Référence</b>
-        <b data-v="opt">🙂 Optimiste</b>
         <b data-v="pess">⚠️ Pessimiste</b>
         <b data-v="pyro">🌩️ Si pyroCb</b>
       </div>
       <div class="views" style="grid-template-columns:1fr">
         <b onclick="randomMember()" id="randBtn">🎲 Tirage aléatoire (1 des 12 simulations)</b>
       </div>
-      <div class="dash-note" id="dashNote">L'incertitude vient de ce qui est vraiment imprévisible :
-        le <b>vent</b> (croissante avec l'échéance), le <b>pyroCb</b> (aléatoire), l'efficacité de la
-        <b>lutte</b>. Température &amp; sécheresse = données observées / prévues.</div>
+      <div class="dash-note" id="dashNote">Deux réglages distincts : les <b>scénarios</b> = le hasard de la nature (vent
+        imprévisible au-delà de 2-3 j, pyroCb aléatoire) ; les <b>moyens de lutte</b> = la décision
+        humaine. La fourchette (p10–p90) affichée dans la jauge résume l'éventail complet.</div>
 
       <h3>🚒 Moyens de lutte <span class="mh-sub">(pompiers + agriculteurs : lignes tenues, largages, tranchées, élagage, feux tactiques)</span></h3>
       <div class="views" style="grid-template-columns:1fr 1fr 1fr" id="luttes">
