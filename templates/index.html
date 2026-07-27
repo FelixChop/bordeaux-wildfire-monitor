@@ -760,9 +760,8 @@ function log(){}  // placeholder (no-op narrator)
 
 const legend=L.control({position:'topleft'});
 legend.onAdd=function(){const d=L.DomUtil.create('div','legend');
-  d.innerHTML='<i style="background:#ffee58"></i>Foyer réel → <i style="background:#7f0000"></i>éteint → <i style="background:#141414;border:1px solid #444"></i>brûlé<br>'+
-    '<i style="background:#4dd0ff"></i>Foyer simulé (prévision)<br>'+
-    '<span style="color:#ffd54f">➤</span> vent (sens + force)';
+  d.innerHTML='<i style="background:#ffee58"></i>Foyer → <i style="background:#7f0000"></i>éteint → <i style="background:#141414;border:1px solid #444"></i>brûlé<br>'+
+    '<span style="color:#ffd54f">➤</span> vent (sens + force) · <span style="color:#4fc3f7">cadre bleu = simulation</span>';
   return d;};
 legend.addTo(map);
 
