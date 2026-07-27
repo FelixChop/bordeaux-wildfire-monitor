@@ -135,10 +135,9 @@
   </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js" crossorigin=""></script>
 <script>
 const BDX=[44.837,-0.579];
-const map=L.map('map',{zoomControl:false,attributionControl:false}).setView([44.9,-0.9],9);
+const map=L.map('map',{zoomControl:false,attributionControl:false,preferCanvas:true}).setView([44.9,-0.9],9);
 L.control.zoom({position:'topleft'}).addTo(map);
 L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{maxZoom:19}).addTo(map);
 L.marker(BDX).addTo(map).bindPopup('Bordeaux');
@@ -147,7 +146,6 @@ L.marker(BDX).addTo(map).bindPopup('Bordeaux');
 let firePts=L.layerGroup().addTo(map);   // past hotspots
 let simLayer=L.layerGroup().addTo(map);   // simulation polygons
 let windLayer=L.layerGroup().addTo(map);  // wind-field arrows
-let heatLayer=null;
 
 let state={mode:'past', past:null, sim:null, data:null, idx:0, playing:false, timer:null};
 
@@ -222,7 +220,6 @@ function render(i){
   i=Math.max(0,Math.min(i, +$('slider').max)); state.idx=i; $('slider').value=i;
   $('slider').style.setProperty('--pct',(i/Math.max(+$('slider').max,1)*100)+'%');
   firePts.clearLayers(); simLayer.clearLayers(); windLayer.clearLayers();
-  if(heatLayer){ map.removeLayer(heatLayer); heatLayer=null; }
   if(state.mode==='past') renderPast(i); else renderSim(i);
 }
 
@@ -244,14 +241,13 @@ function drawWind(i){
 
 function renderPast(i){
   const f=state.past.frames[i]; if(!f){ $('tlTime').textContent='Aucune donnée'; return; }
-  if(typeof L.heatLayer==='function'){
-    const pts=f.points.map(p=>[p.lat,p.lon, Math.min(0.25+(p.frp||0)/40,1)]);
-    heatLayer=L.heatLayer(pts,{radius:18,blur:22,maxZoom:12,minOpacity:.35,
-      gradient:{0.2:'#ffe082',0.4:'#ffb300',0.6:'#ff6d00',0.8:'#ff3d00',1:'#d50000'}}).addTo(map);
-  }else{
-    f.points.forEach(p=>L.circleMarker([p.lat,p.lon],
-      {radius:5,color:'#ff7043',weight:1,fillColor:'#ff3d00',fillOpacity:.6}).addTo(firePts));
-  }
+  f.points.forEach(p=>{
+    const frp=p.frp||0;
+    const r=3+Math.min(frp/18,6);
+    const col=frp>50?'#d50000':frp>15?'#ff3d00':'#ff6d00';
+    L.circleMarker([p.lat,p.lon],{radius:r,color:col,weight:.5,
+      fillColor:col,fillOpacity:.75}).addTo(firePts);
+  });
   $('tlTime').textContent=fmtT(f.timestamp);
   $('tlInfo').textContent=`${f.total} foyers cumulés (+${f.new})`;
 }
