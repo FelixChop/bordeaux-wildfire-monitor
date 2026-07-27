@@ -119,16 +119,24 @@
   <p class="ref">— Ordres de grandeur d'efficacité et seuils de contrôlabilité : Hirsch &amp; Martell (1996), <i>A review of initial attack fire crew productivity</i>, IJWF ; doctrine « règle des 30-30-30 ».</p>
 
   <h2>8. Dispersion des fumées (qualité de l'air prédite)</h2>
-  <p>Nappe advectée sur grille ~4 km par schéma semi-lagrangien sous-échantillonné
-  (déplacement ≤ 1,2 cellule par sous-pas — sans quoi un vent fort ferait « sauter » le panache
-  au-dessus des villes), avec diffusion gaussienne et dépôt :</p>
-  <div class="eq">S<sub>t+dt</sub> = G<sub>σ</sub> ∗ A(S<sub>t</sub>, u·dt) · λ + Q·B<sub>t</sub>
-<br>A : advection semi-lagrangienne (vent moyen horaire) · G<sub>σ</sub> : diffusion (σ≈0,7 cellule/h)
-<br>λ = 0,93/h (dépôt + dilution verticale) · B<sub>t</sub> : cellules en feu depuis &lt; 12 h · Q : taux d'émission</div>
-  <p>C'est la discrétisation classique de l'équation d'advection-diffusion-réaction des panaches.
-  Le champ observé (passé/présent) vient lui du modèle <b>CAMS</b> de Copernicus (chimie-transport
-  complet, résolution ~11 km), qui assimile les émissions de feux réelles.</p>
-  <p class="ref">— Stohl A. et al. (2005), <i>The Lagrangian particle dispersion model FLEXPART</i>, ACP 5 (principe advection-diffusion-dépôt).</p>
+  <p>Modèle de <b>charge de colonne</b> en PM2,5 : la masse émise est conservée, advectée par le
+  <b>vent local</b> (champ interpolé cellule par cellule), diffusée, déposée — et la concentration au
+  sol dépend de la <b>hauteur de couche limite</b>, qui s'effondre la nuit :</p>
+  <div class="eq">∂B/∂t = −u·∇B + G<sub>σ</sub> + E − k<sub>dep</sub>B &nbsp;&nbsp;&nbsp; C(t) = B / H<sub>mix</sub>(t)
+<br>B : charge de colonne [µg/m²] · C : concentration au sol [µg/m³]
+<br>E : émissions = 3,1 g PM2,5/m² en feu/h &nbsp;(2,5 kg/m² consommés × 15 g/kg sur ~12 h)
+<br>H<sub>mix</sub> : 1 200 m le jour → 300 m la nuit (le pic nocturne émerge naturellement)
+<br>advection semi-lagrangienne sous-échantillonnée (déplacement ≤ 1,2 cellule/sous-pas)</div>
+  <p><b>Auto-calibration sur le feu réel</b> : à chaque heure, le modèle rejoue la fumée des
+  détections satellites réelles des 5 derniers jours avec les vents passés, compare son PM2,5 prédit
+  à l'<b>anomalie PM2,5 observée par CAMS à Bordeaux</b>, et ajuste un facteur d'émission global
+  k = médiane(observé/prédit), borné [0,25 ; 4]. Le panache simulé est ensuite ajouté au PM2,5 prévu
+  par CAMS, puis converti en indice par les seuils officiels EAQI (l'indice global étant le max des
+  sous-indices polluants).</p>
+  <p class="ref">— Facteurs d'émission PM2,5 : Urbanski S. (2013), <i>Wildland fire emissions, carbon, and climate</i>, For. Ecol. Manage. ; Andreae M.O. (2019), <i>Emission of trace gases and aerosols from biomass burning</i>, ACP 19.</p>
+  <p class="ref">— Couche limite diurne : Stull R.B. (1988), <i>An Introduction to Boundary Layer Meteorology</i>.</p>
+  <p class="ref">— Principe advection-diffusion-dépôt : Stohl A. et al. (2005), FLEXPART, ACP 5.</p>
+  <p class="ref">— Le champ observé (passé/présent) est le modèle <b>CAMS</b> Copernicus (chimie-transport complet ~11 km, assimilation des feux réels).</p>
 
   <h2>9. Sources de données (APIs)</h2>
   <table>

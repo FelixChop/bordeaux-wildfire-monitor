@@ -409,73 +409,149 @@ _SMK_BBOX = (44.20, -1.75, 45.55, -0.25)   # lat0, lon0, lat1, lon1
 _SMK_NR, _SMK_NC = 32, 40
 
 
-def _smoke_series(store, ig_sel, emit_hours):
-    """Hourly advection-diffusion-decay smoke model over the burn ensemble.
+def _hmix_profile(hour_utc):
+    """Diurnal boundary-layer mixing height [m] (orders of magnitude: Stull 1988).
 
-    S(t+1) = advect(S, wind) * decay + emissions(burning cells)
-    Emissions come from cells burning (ignited < 12 h ago) in the selected
-    runs; the plume accumulates and drifts like real smoke, unlike an
-    instantaneous puff. Returned as AQI-equivalent grids per emitted hour.
+    The SAME smoke mass gives much higher ground concentrations at night,
+    when the boundary layer collapses to a few hundred metres."""
+    h = hour_utc % 24            # heure locale approx = UTC+2
+    if 8 <= h <= 17:
+        return 1200.0            # couche convective diurne
+    if h in (6, 7):
+        return 300.0 + (h - 5) * 300.0
+    if h in (18, 19):
+        return 1200.0 - (h - 17) * 450.0
+    return 300.0                 # couche nocturne stable
+
+
+def _wind_grids(wf, k, LAT, LON):
+    """Per-cell east/north wind [m/s] on the smoke grid at hour index k."""
+    if wf is None or not wf.get('times'):
+        return np.full(LAT.shape, 5.7), np.full(LAT.shape, 0.0)
+    gl = np.array(wf['grid_lats'])
+    gn = np.array(wf['grid_lons'])
+    kk = min(k, len(wf['times']) - 1)
+    sp = np.asarray(wf['speed'][kk])
+    dr = np.asarray(wf['dir'][kk])
+    ue = sp * (-np.sin(np.radians(dr)))
+    vn = sp * (-np.cos(np.radians(dr)))
+    pts = np.column_stack([LAT.ravel(), LON.ravel()])
+    fe = RegularGridInterpolator((gl, gn), ue, bounds_error=False, fill_value=None)
+    fn = RegularGridInterpolator((gl, gn), vn, bounds_error=False, fill_value=None)
+    return fe(pts).reshape(LAT.shape), fn(pts).reshape(LAT.shape)
+
+
+# --- PM2.5 emission physics (literature-anchored) ---------------------------
+# Fuel consumed in Landes pine stands ~2.5 kg/m2, PM2.5 emission factor
+# ~15 g/kg (Urbanski 2013; Andreae 2019), released over ~12 h of flaming +
+# smouldering  =>  flux ~3.1 g/m2/h of burning surface.
+_EMIT_FLUX = 3.1e6      # ug PM2.5 / m2 (burning surface) / h
+_BURN_WIN = 12          # hours a cell keeps emitting after ignition
+_DEP = 0.985            # hourly dry-deposition loss on the column burden
+
+
+def smoke_engine(emission_fn, wf, times, n_hours, emit_hours, k_cal=1.0):
+    """Column-burden transport: B [ug/m2] advected by the LOCAL wind field,
+    diffused, deposited; ground concentration C = B / H_mix(t) [ug/m3].
+
+    Mass-conservative 2D advection of the burden makes the nocturnal
+    concentration spike emerge naturally when H_mix collapses.
+    emission_fn(h) -> burden addition grid [ug/m2] for hour h.
     """
     from scipy.ndimage import map_coordinates, gaussian_filter
     la0, lo0, la1, lo1 = _SMK_BBOX
-    dom = store['dom']
-    n_hours = store['n_hours']
-    wf = store.get('wind_field')
+    lat_ax = np.linspace(la1, la0, _SMK_NR)     # row 0 = north
+    lon_ax = np.linspace(lo0, lo1, _SMK_NC)
+    LON, LAT = np.meshgrid(lon_ax, lat_ax)
+    cell_lat_deg = (la1 - la0) / (_SMK_NR - 1)
+    cell_lon_deg = (lo1 - lo0) / (_SMK_NC - 1)
+    mid_cos = np.cos(np.radians((la0 + la1) / 2))
+    yy, xx = np.mgrid[0:_SMK_NR, 0:_SMK_NC].astype(float)
+    B = np.zeros((_SMK_NR, _SMK_NC))
+    out = {}
+    nT = len(times) if times else 0
+    for h in range(n_hours):
+        k = min(h, nT - 1) if nT else 0
+        ue, vn = _wind_grids(wf, k, LAT, LON)
+        dxg = ue * 3600 / (111_320 * mid_cos) / cell_lon_deg
+        dyg = -vn * 3600 / 111_320 / cell_lat_deg
+        emit = emission_fn(h) * k_cal
+        disp = max(float(np.abs(dxg).max()), float(np.abs(dyg).max()), 1e-6)
+        nsub = max(1, int(np.ceil(disp / 1.2)))
+        dep_sub = _DEP ** (1.0 / nsub)
+        sig_sub = 0.7 / np.sqrt(nsub)
+        for _ in range(nsub):
+            B = map_coordinates(B, [yy - dyg / nsub, xx - dxg / nsub],
+                                order=1, mode='constant')
+            B = gaussian_filter(B, sigma=sig_sub) * dep_sub
+            B = B + emit / nsub
+        if h in emit_hours:
+            hh = 12
+            if times and k < nT:
+                try:
+                    hh = int(times[k][11:13])
+                except (ValueError, TypeError):
+                    pass
+            C = B / _hmix_profile(hh)
+            out[h] = np.clip(C, 0, 800).round(0).astype(int).tolist()
+    return out
 
-    # map burn-domain cells -> smoke-grid indices (precomputed)
+
+def _smoke_geometry(dom=None):
+    la0, lo0, la1, lo1 = _SMK_BBOX
+    la_span = (la1 - la0) / (_SMK_NR - 1) * 111_320
+    lo_span = ((lo1 - lo0) / (_SMK_NC - 1) * 111_320
+               * np.cos(np.radians((la0 + la1) / 2)))
+    return la_span * lo_span     # m2 per smoke cell
+
+
+def _smoke_series(store, ig_sel, emit_hours, k_cal=1.0):
+    """PM2.5 [ug/m3] smoke grids of the SIMULATED fire (one member run)."""
+    dom = store['dom']
+    wf = store.get('wind_field')
+    n_hours = store['n_hours']
+    times = ((wf or {}).get('times')
+             or [m.get('timestamp') for m in (store.get('meta') or [])])
+    la0, lo0, la1, lo1 = _SMK_BBOX
     glat, glon = dom['lat_axis'], dom['lon_axis']
     ri = np.clip(((la1 - glat) / (la1 - la0) * (_SMK_NR - 1)).astype(int), 0, _SMK_NR - 1)
     ci = np.clip(((glon - lo0) / (lo1 - lo0) * (_SMK_NC - 1)).astype(int), 0, _SMK_NC - 1)
     RI = np.repeat(ri[:, None], len(glon), 1)
     CI = np.repeat(ci[None, :], len(glat), 0)
+    flux_b = _EMIT_FLUX * (dom['cell_lat_m'] ** 2) / _smoke_geometry()
+    seed = dom['seed_mask']
 
-    # hourly mean wind (east/north m/s) from the forecast grid
-    if wf is not None and wf.get('times'):
-        sp = np.asarray(wf['speed']).mean(axis=(1, 2))
-        dr_all = np.asarray(wf['dir'])
-        ss = np.sin(np.radians(dr_all)).mean(axis=(1, 2))
-        cc = np.cos(np.radians(dr_all)).mean(axis=(1, 2))
-        dr = (np.degrees(np.arctan2(ss, cc))) % 360
-    else:
-        sp = np.full(n_hours, 8.0)
-        dr = np.full(n_hours, 270.0)
-
-    cell_lat_deg = (la1 - la0) / (_SMK_NR - 1)
-    cell_lon_deg = (lo1 - lo0) / (_SMK_NC - 1)
-    mid_cos = np.cos(np.radians((la0 + la1) / 2))
-
-    S = np.zeros((_SMK_NR, _SMK_NC))
-    yy, xx = np.mgrid[0:_SMK_NR, 0:_SMK_NC].astype(float)
-    out = {}
-    burn_win = 12   # a cell emits smoke for ~12 h after ignition
-    Q = 3.2         # emission strength per burning cell (AQI-equivalent)
-    for h in range(n_hours):
-        k = min(h, len(sp) - 1)
-        u_e = sp[k] * (-np.sin(np.radians(dr[k])))   # toward-east component
-        u_n = sp[k] * (-np.cos(np.radians(dr[k])))
-        # displacement in grid cells over 1 h (row 0 = north)
-        dx = u_e * 3600 / (111_320 * mid_cos) / cell_lon_deg
-        dy = -u_n * 3600 / 111_320 / cell_lat_deg
-        burning = ((ig_sel >= max(h - burn_win, 0)) & (ig_sel <= h)).mean(axis=0)
-        if h < burn_win:
-            burning = np.maximum(burning, dom['seed_mask'] * 1.0)
+    def emission(h):
+        burning = ((ig_sel >= max(h - _BURN_WIN, 0)) & (ig_sel <= h)).mean(axis=0)
+        if h < _BURN_WIN:
+            burning = np.maximum(burning, seed * 1.0)
         emit = np.zeros((_SMK_NR, _SMK_NC))
         np.add.at(emit, (RI.ravel(), CI.ravel()), burning.ravel())
-        # Sub-step the advection so a fast plume SWEEPS through intermediate
-        # cells (Bordeaux included) instead of tunnelling over them when the
-        # hourly displacement exceeds the grid spacing.
-        nsub = max(1, int(np.ceil(max(abs(dx), abs(dy)) / 1.2)))
-        decay_sub = 0.93 ** (1.0 / nsub)
-        sig_sub = 0.7 / np.sqrt(nsub)
-        for _ in range(nsub):
-            S = map_coordinates(S, [yy - dy / nsub, xx - dx / nsub],
-                                order=1, mode='constant')
-            S = gaussian_filter(S, sigma=sig_sub) * decay_sub
-            S = S + emit * (Q / nsub)
-        if h in emit_hours:
-            out[h] = np.clip(S, 0, 300).round(0).astype(int).tolist()
-    return out
+        return emit * flux_b
+
+    return smoke_engine(emission, wf, times, n_hours, emit_hours, k_cal)
+
+
+def hindcast_smoke(hotspot_offsets, wind_field, n_hours, emit_hours, k_cal=1.0):
+    """Replay the REAL fire's smoke over past hours (for calibration).
+
+    hotspot_offsets: [(row, col, ignition_hour_offset)] on the smoke grid;
+    each VIIRS detection ~375 m pixel => burning surface ~1.4e5 m2."""
+    src = {}
+    for r, c, h0 in hotspot_offsets:
+        src.setdefault(int(h0), []).append((r, c))
+    flux_b = _EMIT_FLUX * 1.4e5 / _smoke_geometry()
+
+    def emission(h):
+        emit = np.zeros((_SMK_NR, _SMK_NC))
+        for h0, cells in src.items():
+            if 0 <= h - h0 < _BURN_WIN:
+                for r, c in cells:
+                    emit[r, c] += flux_b
+        return emit
+
+    times = (wind_field or {}).get('times')
+    return smoke_engine(emission, wind_field, times, n_hours, emit_hours, k_cal)
 
 
 def derive_view(store, view='ref', emit_every=3):
@@ -495,19 +571,27 @@ def derive_view(store, view='ref', emit_every=3):
     n = len(igns)
 
     finals = (seed[None, :, :] | ((igns >= 0) & (igns < n_hours))).sum(axis=(1, 2))
-    order = np.argsort(finals)
+    order = np.argsort(finals).tolist()
+    pyro = store['pyro']
+    nonpyro = [i for i in order if not pyro[i]] or order
+    pyros = [i for i in order if pyro[i]]
+    # Sémantique claire : Référence & Optimiste = scénarios SANS orage de feu ;
+    # « Si pyroCb » = scénarios AVEC ; Pessimiste = queue haute tous tirages.
     if view.startswith('m') and view[1:].isdigit():
         member = min(int(view[1:]), n - 1)
-    elif view == 'pyro' and store['pyro'].any():
-        cand = [i for i in order.tolist() if store['pyro'][i]]
-        member = cand[len(cand) // 2]
-    else:
-        q = {'ref': 0.5, 'opt': 0.10, 'pess': 0.90}.get(view, 0.5)
-        member = int(order[min(int(round(q * (n - 1))), n - 1)])
+    elif view == 'pyro' and pyros:
+        member = pyros[len(pyros) // 2]
+    elif view == 'opt':
+        member = nonpyro[int(round(0.10 * (len(nonpyro) - 1)))]
+    elif view == 'pess':
+        member = order[int(round(0.90 * (n - 1)))]
+    else:  # ref
+        member = nonpyro[int(round(0.50 * (len(nonpyro) - 1)))]
     ig_m = igns[member]
 
     emit_hours = sorted(set(list(range(0, n_hours, emit_every)) + [n_hours - 1]))
-    smoke = _smoke_series(store, igns[member:member + 1], set(emit_hours))
+    smoke = _smoke_series(store, igns[member:member + 1], set(emit_hours),
+                          k_cal=store.get('smoke_k', 1.0))
     frames = []
     prev_h = -1
     for H in emit_hours:

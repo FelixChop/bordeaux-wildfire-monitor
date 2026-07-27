@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 ENV PORT=5000
+ENV PYTHONUNBUFFERED=1
 ENV NASA_FIRMS_MAP_KEY=${NASA_FIRMS_MAP_KEY}
 
 EXPOSE 5000

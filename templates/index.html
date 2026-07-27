@@ -103,7 +103,7 @@
     #airBtn.on{background:rgba(2,119,189,.9);border-color:#0277bd}
     #staBtn.on{background:rgba(198,40,40,.85);border-color:#c62828}
     @media(min-width:820px){.layers{top:110px}}
-    .leaflet-bottom.leaflet-left{bottom:calc(var(--tl-h) + 64px)}
+    .leaflet-top.leaflet-left .legend{margin-top:8px}
     /* ---- menu burger plein écran ---- */
     .menu{position:fixed;inset:0;z-index:1700;background:rgba(14,11,10,.98);
       display:flex;flex-direction:column}
@@ -244,7 +244,7 @@
 <script>
 const BDX=[44.837,-0.579];
 // Vue verrouillée : de l'océan (Lacanau océan) à Bordeaux rive droite.
-const VIEW=L.latLngBounds([[44.60,-1.30],[45.06,-0.48]]);
+const VIEW=L.latLngBounds([[44.33,-1.35],[45.06,-0.45]]);  // Biscarrosse -> Bordeaux rive droite
 const map=L.map('map',{zoomControl:false,attributionControl:false,preferCanvas:true,
   dragging:false,scrollWheelZoom:false,doubleClickZoom:false,touchZoom:false,
   boxZoom:false,keyboard:false,zoomSnap:0.1}).fitBounds(VIEW);
@@ -584,6 +584,14 @@ let airOverlay=null;
 const AIRW=64, AIRH=48, AIRSC=8;
 const airCvs=document.createElement('canvas'); airCvs.width=AIRW; airCvs.height=AIRH;
 const airBig=document.createElement('canvas'); airBig.width=AIRW*AIRSC; airBig.height=AIRH*AIRSC;
+// PM2.5 (ug/m3) -> sous-indice EAQI (seuils officiels EEA)
+function eaqiPM(p){
+  const bp=[[0,0],[10,20],[20,40],[25,60],[50,80],[75,100],[300,160]];
+  for(let i=1;i<bp.length;i++){
+    if(p<=bp[i][0]){const[a,va]=bp[i-1],[b,vb]=bp[i];return va+(vb-va)*(p-a)/(b-a);}
+  }
+  return 160;
+}
 function aqiRGB(v){ // même échelle que le backend (0..120)
   const stops=[[0,[46,125,50]],[21.6,[139,195,74]],[40.8,[205,220,57]],
     [60,[255,179,0]],[79.2,[251,140,0]],[98.4,[229,57,53]],[120,[142,36,170]]];
@@ -611,11 +619,15 @@ function renderAirAt(f){
   const af=state.airField; if(!af||!airOverlay||!airOverlay.setUrl) return;
   let k=state.airIdx[(f.timestamp||'').slice(0,13)];
   if(k==null) k=af.times.length-1;                       // clamp au dernier connu
-  const base=af.aqi[Math.min(k,af.aqi.length-1)];        // 8 x 10
+  const kk=Math.min(k,af.aqi.length-1);
+  const base=af.aqi[kk];                                  // indice observé/prévu
+  const basePm=(af.pm25||[])[kk];                         // PM2.5 CAMS
   const [la0,lo0,la1,lo1]=af.bbox;
   const nl=base.length, nc=base[0].length;
-  // grille fine bilinéaire
+  const isSim=(f.kind==='sim'&&f.smoke);
+  // grille fine bilinéaire (indice + PM2.5 si simulation)
   const fine=new Float32Array(AIRW*AIRH);
+  const pmF=isSim?new Float32Array(AIRW*AIRH):null;
   for(let y=0;y<AIRH;y++){
     const gy=(1-y/(AIRH-1))*(nl-1);                      // ligne 0 = nord
     const i0=Math.min(Math.floor(gy),nl-2), ty=gy-i0;
@@ -624,13 +636,16 @@ function renderAirAt(f){
       const j0=Math.min(Math.floor(gx),nc-2), tx=gx-j0;
       fine[y*AIRW+x]=base[i0][j0]*(1-ty)*(1-tx)+base[i0+1][j0]*ty*(1-tx)
                     +base[i0][j0+1]*(1-ty)*tx+base[i0+1][j0+1]*ty*tx;
+      if(pmF&&basePm)
+        pmF[y*AIRW+x]=basePm[i0][j0]*(1-ty)*(1-tx)+basePm[i0+1][j0]*ty*(1-tx)
+                     +basePm[i0][j0+1]*(1-ty)*tx+basePm[i0+1][j0+1]*ty*tx;
     }
   }
   // panache du feu SIMULÉ : nappe de fumée transportée (advection+accumulation,
   // calculée côté serveur) — même logique qu'un modèle de dispersion
-  if(f.kind==='sim'&&f.smoke){
+  if(isSim&&pmF){
     const sm=f.smoke, snr=sm.length, snc=sm[0].length;
-    const sb=(state.sim&&state.sim.smoke_bbox)||[44.45,-1.45,45.20,-0.35];
+    const sb=(state.sim&&state.sim.smoke_bbox)||af.bbox;
     const[sla0,slo0,sla1,slo1]=sb;
     for(let y=0;y<AIRH;y++){
       const la=la1-(y/(AIRH-1))*(la1-la0);
@@ -642,10 +657,12 @@ function renderAirAt(f){
         const gx=(lo-slo0)/(slo1-slo0)*(snc-1);
         if(gx<0||gx>snc-1) continue;
         const j0=Math.min(Math.floor(gx),snc-2), tx=gx-j0;
-        fine[y*AIRW+x]+=sm[i0][j0]*(1-ty)*(1-tx)+sm[i0+1][j0]*ty*(1-tx)
-                       +sm[i0][j0+1]*(1-ty)*tx+sm[i0+1][j0+1]*ty*tx;
+        pmF[y*AIRW+x]+=sm[i0][j0]*(1-ty)*(1-tx)+sm[i0+1][j0]*ty*(1-tx)
+                      +sm[i0][j0+1]*(1-ty)*tx+sm[i0+1][j0+1]*ty*tx;
       }
     }
+    // règle EAQI : l'indice global est le MAX des sous-indices polluants
+    for(let i=0;i<AIRW*AIRH;i++) fine[i]=Math.max(fine[i], eaqiPM(pmF[i]));
   }
   // colormap -> canvas -> upscale lissé -> overlay
   const ctx=airCvs.getContext('2d');
@@ -729,7 +746,7 @@ function drawAircraft(d,layer){
 }
 function log(){}  // placeholder (no-op narrator)
 
-const legend=L.control({position:'bottomleft'});
+const legend=L.control({position:'topleft'});
 legend.onAdd=function(){const d=L.DomUtil.create('div','legend');
   d.innerHTML='<i style="background:#ffee58"></i>Foyer réel → <i style="background:#7f0000"></i>éteint → <i style="background:#141414;border:1px solid #444"></i>brûlé<br>'+
     '<i style="background:#4dd0ff"></i>Foyer simulé (prévision)<br>'+

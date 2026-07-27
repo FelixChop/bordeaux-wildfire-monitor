@@ -106,7 +106,7 @@ def _fetch_firms_product(map_key, product, bbox, days=5):
 def fetch_nasa_firms():
     """Fetch real-time fire hotspots from several NRT satellites and merge them."""
     map_key = os.getenv('NASA_FIRMS_MAP_KEY', 'DEMO_KEY')
-    bbox = (-1.5, 44.5, -0.5, 45.2)
+    bbox = (-1.6, 44.2, -0.4, 45.3)   # inclut Biscarrosse au sud
 
     hotspots = []
     for product in _FIRMS_PRODUCTS:
@@ -574,7 +574,7 @@ def compute_ensemble():
     if not latest_data:
         return None
     from src.fire_front import simulate_ensemble, derive_view
-    ver = f"{last_update}:{datetime.utcnow().strftime('%dT%H')}"
+    ver = f"v6:{last_update}:{datetime.utcnow().strftime('%dT%H')}"
     if _ens_store['ver'] == ver:
         return _ens_store['views']
     if not _sim_lock.acquire(blocking=False):
@@ -585,7 +585,8 @@ def compute_ensemble():
         hotspots, wind, wf, fuel, _ = _sim_inputs()
         store = simulate_ensemble(
             hotspots, wind, wind_field=wf, veg_fuel=fuel, veg_bbox=SIM_BBOX,
-            max_hours=168, n_runs=int(os.getenv('ENS_RUNS', '12')))
+            max_hours=168, n_runs=int(os.getenv('ENS_RUNS', '16')))
+        store['smoke_k'] = calibrate_smoke_k()   # ancré sur le panache RÉEL
         views = {}
         for v in _VIEWS:
             d = derive_view(store, v)
@@ -1064,7 +1065,7 @@ def fetch_meteosat_fire():
         fires = []
         for r, c in zip(rows.tolist(), cols.tolist()):
             lo, la = P(float(x[c]) * H, float(y[r]) * H, inverse=True)
-            if -1.6 <= lo <= -0.3 and 44.3 <= la <= 45.4:
+            if -1.7 <= lo <= -0.3 and 44.15 <= la <= 45.4:
                 fires.append({'lat': round(float(la), 4), 'lon': round(float(lo), 4),
                               'level': int(fr[r, c])})
         end = tstr.split('/')[-1] if tstr else None
@@ -1154,47 +1155,111 @@ def api_air_quality_png():
                     headers={'Cache-Control': 'public, max-age=900'})
 
 
+def fetch_air_field():
+    """Hourly CAMS air field (EAQI index + PM2.5 µg/m³): past 5 d + forecast 7 d."""
+    n_lat, n_lon = 9, 10
+    lat0, lat1, lon0, lon1 = 44.20, 45.55, -1.75, -0.25
+    lats = np.linspace(lat0, lat1, n_lat)
+    lons = np.linspace(lon0, lon1, n_lon)
+    laq, loq = [], []
+    for la in lats:
+        for lo in lons:
+            laq.append(round(float(la), 3))
+            loq.append(round(float(lo), 3))
+    r = requests.get('https://air-quality-api.open-meteo.com/v1/air-quality', params={
+        'latitude': ','.join(map(str, laq)), 'longitude': ','.join(map(str, loq)),
+        'hourly': 'european_aqi,pm2_5', 'past_days': 5, 'forecast_days': 7,
+        'timezone': 'UTC'}, timeout=30)
+    if r.status_code != 200:
+        return None
+    res = r.json()
+    if isinstance(res, dict):
+        res = [res]
+    times = res[0].get('hourly', {}).get('time', [])
+    T = len(times)
+    aqi = np.zeros((T, n_lat, n_lon))
+    pm25 = np.zeros((T, n_lat, n_lon))
+    for idx, x in enumerate(res[:n_lat * n_lon]):
+        h = x.get('hourly', {})
+        a = h.get('european_aqi') or []
+        p = h.get('pm2_5') or []
+        i, j = idx // n_lon, idx % n_lon
+        for t in range(T):
+            aqi[t, i, j] = a[t] if t < len(a) and a[t] is not None else 0
+            pm25[t, i, j] = p[t] if t < len(p) and p[t] is not None else 0
+    return {'times': times, 'bbox': [lat0, lon0, lat1, lon1],
+            'aqi': aqi.round(0).tolist(), 'pm25': pm25.round(1).tolist()}
+
+
 @app.route('/api/air-field')
 def api_air_field():
-    """Hourly air-quality field (CAMS EAQI) on a grid: past 5 d + forecast 7 d.
-
-    Lets the client colour the air per timeline frame; on simulation frames it
-    adds the smoke plume of the simulated fire on top.
-    """
-    def prod():
-        n_lat, n_lon = 9, 10
-        lat0, lat1, lon0, lon1 = 44.20, 45.55, -1.75, -0.25
-        lats = np.linspace(lat0, lat1, n_lat)
-        lons = np.linspace(lon0, lon1, n_lon)
-        laq, loq = [], []
-        for la in lats:
-            for lo in lons:
-                laq.append(round(float(la), 3))
-                loq.append(round(float(lo), 3))
-        r = requests.get('https://air-quality-api.open-meteo.com/v1/air-quality', params={
-            'latitude': ','.join(map(str, laq)), 'longitude': ','.join(map(str, loq)),
-            'hourly': 'european_aqi', 'past_days': 5, 'forecast_days': 7,
-            'timezone': 'UTC'}, timeout=30)
-        if r.status_code != 200:
-            return None
-        res = r.json()
-        if isinstance(res, dict):
-            res = [res]
-        times = res[0].get('hourly', {}).get('time', [])
-        T = len(times)
-        aqi = np.zeros((T, n_lat, n_lon))
-        for idx, x in enumerate(res[:n_lat * n_lon]):
-            arr = x.get('hourly', {}).get('european_aqi') or []
-            i, j = idx // n_lon, idx % n_lon
-            for t in range(min(T, len(arr))):
-                aqi[t, i, j] = arr[t] if arr[t] is not None else 0
-        return {'times': times,
-                'bbox': [lat0, lon0, lat1, lon1],
-                'aqi': aqi.round(0).tolist()}
-    data = _cached('airfield', 1800, prod)
+    """Champ air horaire pour le client (index observé + PM2.5 pour le futur)."""
+    data = _cached('airfield', 1800, fetch_air_field)
     if data is None:
         return jsonify({'error': 'No air field'}), 503
     return jsonify(data)
+
+
+def calibrate_smoke_k():
+    """Auto-calibration of smoke emissions against REALITY.
+
+    Replays the real fire's smoke (FIRMS detections + past winds) over the
+    last days, compares the predicted PM2.5 with the CAMS-observed PM2.5
+    anomaly at Bordeaux, and returns a global emission scaling factor.
+    """
+    try:
+        from src.fire_front import hindcast_smoke, _SMK_BBOX, _SMK_NR, _SMK_NC
+        af = _cached('airfield', 1800, fetch_air_field)
+        if not af or not latest_data or _wind_field is None:
+            return 1.0
+        times_af = af['times']
+        now_key = datetime.utcnow().strftime('%Y-%m-%dT%H:00')
+        n_past = sum(1 for t in times_af if t < now_key)
+        if n_past < 30:
+            return 1.0
+        t0 = datetime.strptime(times_af[0], '%Y-%m-%dT%H:%M')
+        la0, lo0, la1, lo1 = _SMK_BBOX
+        offs = []
+        for hsp in latest_data['firms'].get('hotspots', []):
+            dt = _parse_ts(hsp.get('timestamp'))
+            if not dt:
+                continue
+            h0 = int((dt - t0).total_seconds() // 3600)
+            if not (0 <= h0 < n_past):
+                continue
+            rr = round((la1 - hsp['lat']) / (la1 - la0) * (_SMK_NR - 1))
+            cc = round((hsp['lon'] - lo0) / (lo1 - lo0) * (_SMK_NC - 1))
+            if 0 <= rr < _SMK_NR and 0 <= cc < _SMK_NC:
+                offs.append((rr, cc, h0))
+        if len(offs) < 50:
+            return 1.0
+        pred = hindcast_smoke(offs, _wind_field, n_past, set(range(n_past)))
+        # Bordeaux dans les deux grilles
+        r_b = round((la1 - 44.84) / (la1 - la0) * (_SMK_NR - 1))
+        c_b = round((-0.58 - lo0) / (lo1 - lo0) * (_SMK_NC - 1))
+        pm = np.asarray(af['pm25'])
+        n_lat, n_lon = pm.shape[1], pm.shape[2]
+        bi = round((44.84 - la0) / (la1 - la0) * (n_lat - 1))
+        bj = round((-0.58 - lo0) / (lo1 - lo0) * (n_lon - 1))
+        ratios = []
+        for h in range(n_past):
+            p = pred.get(h)
+            if p is None:
+                continue
+            p_val = p[r_b][c_b]
+            if p_val < 8:
+                continue   # heures sans panache prédit : non informatives
+            bg = float(np.percentile(pm[h], 10))     # fond régional
+            anom = max(float(pm[h, bi, bj]) - bg, 0.0)
+            ratios.append(anom / p_val)
+        if len(ratios) < 6:
+            return 1.0
+        k = float(np.clip(np.median(ratios), 0.25, 4.0))
+        print(f"✓ Calibration fumée vs CAMS : k={k:.2f} ({len(ratios)} heures)")
+        return k
+    except Exception as e:
+        print(f"calibration fumée erreur: {e}")
+        return 1.0
 
 
 @app.route('/api/air-grid')
