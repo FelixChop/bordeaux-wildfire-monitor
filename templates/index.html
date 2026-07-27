@@ -193,13 +193,14 @@
       <div class="views" id="views" style="grid-template-columns:1fr 1fr 1fr">
         <b data-v="ref" class="on">🎯 Référence</b>
         <b data-v="pess">⚠️ Pessimiste</b>
-        <b data-v="pyro">🌩️ Orage de feu</b>
+        <b data-v="pyro">🌩️ Nouvel orage de feu</b>
       </div>
       <div class="dash-note" style="margin-top:2px">
         🎯 l'évolution la plus probable · ⚠️ si la météo tourne mal (pire tirage sur 10) ·
-        🌩️ si l'incendie déclenche son propre orage — un <b>pyrocumulonimbus</b> : colonne de fumée
-        si puissante qu'elle crée un orage au-dessus du feu, avec vents chaotiques et pluies de
-        braises (probabilité estimée : <b id="pyroProba">~40 %</b> sur 7 jours)
+        🌩️ si le feu déclenche un <b>NOUVEL</b> orage de feu (pyrocumulonimbus : la colonne de fumée
+        crée son propre orage → vents chaotiques, pluies de braises — comme il a pu s'en produire au
+        paroxysme des derniers jours). La probabilité dépend de l'intensité simulée du feu :
+        <b id="pyroProba">—</b> sur 7 jours ; un feu qui s'éteint n'en produit plus.
       </div>
       <div class="views" style="grid-template-columns:1fr">
         <b onclick="randomMember()" id="randBtn">🎲 Tirage aléatoire (1 des 12 simulations)</b>

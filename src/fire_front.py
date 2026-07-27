@@ -168,8 +168,22 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
     contained = np.zeros((nrows, ncols), dtype=bool)
     _ones33 = np.ones((3, 3), dtype=bool)
 
+    pyro_until = -1
+    pyro_any = False
     for h in range(n_hours):
+        # PyroCb ÉMERGENT : chaque après-midi, la probabilité qu'un orage de
+        # feu se déclenche dépend de l'INTENSITÉ du feu simulé (surface active)
+        # et de la chaleur — un feu mourant n'en produit plus.
+        if rng is not None and h % 24 == 12:
+            act_ha = float((burned & ~contained).sum() * dom['cell_area_ha'])
+            p_day = min(0.35, 0.12 * (act_ha / 20000.0))
+            if rng.random() < p_day:
+                pyro_until = h + 10
+                pyro_any = True
+        pyro_on = (h <= pyro_until)
         d_extra = dir_off + (float(dir_noise[h]) if dir_noise is not None else 0.0)
+        if pyro_on and rng is not None:
+            d_extra += float(rng.normal(0, 35))     # vents chaotiques
         if have_field:
             speed = interp(sp_h[h]) * speed_mult
             wdir = di_h[h] + d_extra
@@ -199,6 +213,8 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
         pe_u, pn_u = pe / pmag, pn / pmag
 
         cal_eff = cal_mult * (float(cal_h[h]) if cal_h is not None else 1.0)
+        if pyro_on:
+            cal_eff *= 1.35                     # intensification convective
         ros = _ros_grid(speed, rh, fuel_grid, temp, cal_eff, soil)
         if suppression:
             # Firefighting model: ground crews + air support (Canadairs, Dash,
@@ -237,7 +253,7 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
 
         # Ember spotting: routine short throws (0.3-1.5 km, breakouts ahead of
         # the front) + pyroCb long throws (2-8 km) when a fire storm is active.
-        pyro_rate = float(spot_h[h]) if spot_h is not None else spot_rate
+        pyro_rate = (float(spot_h[h]) if spot_h is not None else spot_rate) + (1.2 if pyro_on else 0.0)
         if rng is not None:
             recent = burned & (ign >= h - 3) & ~contained
             if h < 3:
@@ -310,7 +326,7 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
                          if (temp is not None and m.any()) else None),
             })
 
-    return ign, meta, n_hours
+    return ign, meta, n_hours, pyro_any
 
 
 def simulate_monte_carlo(hotspots, wind_records, wind_field=None, veg_fuel=None,
@@ -338,9 +354,9 @@ def simulate_monte_carlo(hotspots, wind_records, wind_field=None, veg_fuel=None,
         if pyro_std > 0:   # pyroCb: erratic hourly wind swings, every run
             pert['dir_noise'] = rng.normal(0, pyro_std, max_hours)
         pert['rng'] = rng   # for ember-spotting draws
-        ign, m, n_hours = _run_once(dom, wind_field, wind_records, max_hours,
-                                    pert, want_meta=(k == 0),
-                                    suppression=suppression, scenario=scenario)
+        ign, m, n_hours, _pa = _run_once(dom, wind_field, wind_records, max_hours,
+                                         pert, want_meta=(k == 0),
+                                         suppression=suppression, scenario=scenario)
         igns.append(ign)
         if k == 0:
             meta = m
@@ -422,24 +438,9 @@ def simulate_ensemble(hotspots, wind_records, wind_field=None, veg_fuel=None,
         if k > 0:  # run 0 = trajectoire de référence non perturbée
             pert['dir_noise'] = dn
             pert['speed_mult_h'] = np.exp(sm)
-        # pyroCb: each afternoon may develop one (stochastic), boosting spread
-        cal_arr = np.ones(max_hours)
-        spot_arr = np.zeros(max_hours)
-        pyro_any = False
-        for d in range(max_hours // 24 + 1):
-            if rng.random() < pyro_daily_p:
-                pyro_any = True
-                h0, h1 = d * 24 + 12, min(d * 24 + 22, max_hours)
-                if h0 < max_hours:
-                    cal_arr[h0:h1] = 1.35
-                    spot_arr[h0:h1] = 1.2
-                    if 'dir_noise' in pert:
-                        pert['dir_noise'][h0:h1] += rng.normal(0, 35, max(h1 - h0, 0))
-        pert['cal_h'] = cal_arr
-        pert['spot_h'] = spot_arr
-        ign, m, n_hours = _run_once(dom, wind_field, wind_records, max_hours,
-                                    pert, want_meta=(k == 0), suppression=True,
-                                    scenario=scenario)
+        ign, m, n_hours, pyro_any = _run_once(
+            dom, wind_field, wind_records, max_hours,
+            pert, want_meta=(k == 0), suppression=True, scenario=scenario)
         igns.append(ign)
         pyro_flags.append(pyro_any)
         if k == 0:
