@@ -175,12 +175,13 @@ async function getJSON(url, tries=20){
 async function boot(){
   try{
     const data=await getJSON('/api/data');           // wait until data is warm
-    const [past,sim,wind]=await Promise.all([
+    const [past,sim,wind,airh]=await Promise.all([
       getJSON('/api/fire-history'),
       getJSON('/api/simulation'),
-      getJSON('/api/windfield').catch(()=>null)
+      getJSON('/api/windfield').catch(()=>null),
+      fetch('/api/aircraft-history').then(r=>r.json()).catch(()=>({positions:[]}))
     ]);
-    state.data=data; state.past=past; state.sim=sim; state.wind=wind;
+    state.data=data; state.past=past; state.sim=sim; state.wind=wind; state.airHist=airh;
     renderStats();
     fitToFire();
     setMode('past');
@@ -275,6 +276,16 @@ function renderPast(i){
     L.circleMarker([p.lat,p.lon],{radius:r,color:col,weight:.5,
       fillColor:col,fillOpacity:.75}).addTo(firePts);
   });
+  // replay recorded water-bomber positions within this hour
+  const ah=state.airHist&&state.airHist.positions;
+  if(ah&&ah.length){
+    const t0=Date.parse(f.timestamp)/1000, t1=t0+3600;
+    ah.filter(a=>a.t>=t0&&a.t<t1).forEach(a=>{
+      const ic=L.divIcon({className:'',iconSize:[22,22],
+        html:`<div style="transform:rotate(${a.hdg||0}deg);color:${a.fire?'#d50000':'#0277bd'};font-size:18px;filter:drop-shadow(0 1px 2px #000)">✈️</div>`});
+      L.marker([a.lat,a.lon],{icon:ic}).bindTooltip(a.cs).addTo(firePts);
+    });
+  }
   $('tlTime').textContent=fmtT(f.timestamp);
   $('tlInfo').textContent=`${f.total} foyers cumulés (+${f.new})`;
 }

@@ -798,6 +798,23 @@ def api_aircraft():
     return jsonify({'aircraft': _cached('aircraft', 45, prod) or []})
 
 
+@app.route('/api/aircraft-history')
+def api_aircraft_history():
+    """Recorded water-bomber positions (built by the host logger) for replay."""
+    path = os.getenv('AIRCRAFT_LOG', '/data/aircraft.jsonl')
+    pos = []
+    try:
+        with open(path) as f:
+            for ln in f:
+                try:
+                    pos.append(json.loads(ln))
+                except ValueError:
+                    pass
+    except FileNotFoundError:
+        pass
+    return jsonify({'positions': pos})
+
+
 # Start background data fetch thread at import time so it also runs under
 # gunicorn (which never executes the __main__ block). update_data() does its
 # first fetch immediately then loops with an hourly sleep.
