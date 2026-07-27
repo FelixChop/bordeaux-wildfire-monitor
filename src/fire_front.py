@@ -384,7 +384,74 @@ def simulate_ensemble(hotspots, wind_records, wind_field=None, veg_fuel=None,
             meta = m
 
     return {'igns': np.stack(igns), 'pyro': np.array(pyro_flags),
-            'dom': dom, 'meta': meta, 'n_hours': n_hours, 'n_runs': n_runs}
+            'dom': dom, 'meta': meta, 'n_hours': n_hours, 'n_runs': n_runs,
+            'wind_field': wind_field}
+
+
+# Smoke transport grid (matches the air-quality overlay bbox)
+_SMK_BBOX = (44.45, -1.45, 45.20, -0.35)   # lat0, lon0, lat1, lon1
+_SMK_NR, _SMK_NC = 32, 40
+
+
+def _smoke_series(store, ig_sel, emit_hours):
+    """Hourly advection-diffusion-decay smoke model over the burn ensemble.
+
+    S(t+1) = advect(S, wind) * decay + emissions(burning cells)
+    Emissions come from cells burning (ignited < 12 h ago) in the selected
+    runs; the plume accumulates and drifts like real smoke, unlike an
+    instantaneous puff. Returned as AQI-equivalent grids per emitted hour.
+    """
+    from scipy.ndimage import map_coordinates, gaussian_filter
+    la0, lo0, la1, lo1 = _SMK_BBOX
+    dom = store['dom']
+    n_hours = store['n_hours']
+    wf = store.get('wind_field')
+
+    # map burn-domain cells -> smoke-grid indices (precomputed)
+    glat, glon = dom['lat_axis'], dom['lon_axis']
+    ri = np.clip(((la1 - glat) / (la1 - la0) * (_SMK_NR - 1)).astype(int), 0, _SMK_NR - 1)
+    ci = np.clip(((glon - lo0) / (lo1 - lo0) * (_SMK_NC - 1)).astype(int), 0, _SMK_NC - 1)
+    RI = np.repeat(ri[:, None], len(glon), 1)
+    CI = np.repeat(ci[None, :], len(glat), 0)
+
+    # hourly mean wind (east/north m/s) from the forecast grid
+    if wf is not None and wf.get('times'):
+        sp = np.asarray(wf['speed']).mean(axis=(1, 2))
+        dr_all = np.asarray(wf['dir'])
+        ss = np.sin(np.radians(dr_all)).mean(axis=(1, 2))
+        cc = np.cos(np.radians(dr_all)).mean(axis=(1, 2))
+        dr = (np.degrees(np.arctan2(ss, cc))) % 360
+    else:
+        sp = np.full(n_hours, 8.0)
+        dr = np.full(n_hours, 270.0)
+
+    cell_lat_deg = (la1 - la0) / (_SMK_NR - 1)
+    cell_lon_deg = (lo1 - lo0) / (_SMK_NC - 1)
+    mid_cos = np.cos(np.radians((la0 + la1) / 2))
+
+    S = np.zeros((_SMK_NR, _SMK_NC))
+    yy, xx = np.mgrid[0:_SMK_NR, 0:_SMK_NC].astype(float)
+    out = {}
+    burn_win = 12   # a cell emits smoke for ~12 h after ignition
+    Q = 3.2         # emission strength per burning cell (AQI-equivalent)
+    for h in range(n_hours):
+        k = min(h, len(sp) - 1)
+        u_e = sp[k] * (-np.sin(np.radians(dr[k])))   # toward-east component
+        u_n = sp[k] * (-np.cos(np.radians(dr[k])))
+        # displacement in grid cells over 1 h (row 0 = north)
+        dx = u_e * 3600 / (111_320 * mid_cos) / cell_lon_deg
+        dy = -u_n * 3600 / 111_320 / cell_lat_deg
+        S = map_coordinates(S, [yy - dy, xx - dx], order=1, mode='constant')
+        S = gaussian_filter(S, sigma=0.7) * 0.93
+        burning = ((ig_sel >= max(h - burn_win, 0)) & (ig_sel <= h)).mean(axis=0)
+        if h < burn_win:
+            burning = np.maximum(burning, dom['seed_mask'] * 1.0)
+        emit = np.zeros((_SMK_NR, _SMK_NC))
+        np.add.at(emit, (RI.ravel(), CI.ravel()), burning.ravel())
+        S = S + emit * Q
+        if h in emit_hours:
+            out[h] = np.clip(S, 0, 300).round(0).astype(int).tolist()
+    return out
 
 
 _VIEW_THR = {'ref': 0.5, 'opt': 0.85, 'pess': 0.2, 'pyro': 0.5}
@@ -404,6 +471,7 @@ def derive_view(store, view='ref', emit_every=3):
     seed = dom['seed_mask']
 
     emit_hours = sorted(set(list(range(0, n_hours, emit_every)) + [n_hours - 1]))
+    smoke = _smoke_series(store, ig, set(emit_hours))
     frames = []
     prev = np.zeros_like(seed)
     for H in emit_hours:
@@ -429,7 +497,10 @@ def derive_view(store, view='ref', emit_every=3):
             'area_p10': int(np.percentile(areas, 10)),
             'area_p90': int(np.percentile(areas, 90)),
             'new_points': new_pts,
+            'smoke': smoke.get(H),
         })
     return {'n_frames': len(frames), 'n_seeds': dom['n_seeds'],
             'n_runs': int(sel.sum()), 'view': view,
-            'pyro_runs': int(store['pyro'].sum()), 'frames': frames}
+            'pyro_runs': int(store['pyro'].sum()),
+            'smoke_bbox': list(_SMK_BBOX), 'smoke_shape': [_SMK_NR, _SMK_NC],
+            'frames': frames}

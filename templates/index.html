@@ -346,7 +346,8 @@ function buildTimeline(){
       sf.push({kind:'sim',hour:H,
         timestamp:new Date(simStartMs+H*3600e3).toISOString().slice(0,16)+'Z',
         area_ha:src.area_ha,area_p10:src.area_p10,area_p90:src.area_p90,
-        wind_speed_ms:src.wind_speed_ms,humidity_pct:src.humidity_pct,temp_c:src.temp_c});
+        wind_speed_ms:src.wind_speed_ms,humidity_pct:src.humidity_pct,temp_c:src.temp_c,
+        smoke:src.smoke});
     }
   }
   state.frames=pf.concat(sf);
@@ -589,37 +590,24 @@ function renderAirAt(f){
                     +base[i0][j0+1]*(1-ty)*tx+base[i0+1][j0+1]*ty*tx;
     }
   }
-  // panache du feu SIMULÉ (frames futures uniquement)
-  if(f.kind==='sim'){
-    const H=f.hour||0, effH=state.nowIdx+H;
-    const wk=state.windIdx[(f.timestamp||'').slice(0,13)];
-    const w=state.wind;
-    const srcs=[];
-    (state.firePts||[]).forEach(p=>{const a=effH-p.h; if(a>=0&&a<24) srcs.push([p.lat,p.lon,1-a/24]);});
-    (state.simPts||[]).forEach(p=>{const a=H-p.h; if(a>=0&&a<24) srcs.push([p.lat,p.lon,1-a/24]);});
-    const step=Math.max(1,Math.ceil(srcs.length/1200));  // plafond perf
-    for(let s=0;s<srcs.length;s+=step){
-      const [la,lo,wgt]=srcs[s];
-      let spd=8,dir=270;
-      if(w&&wk!=null){
-        const ai=Math.max(0,Math.min(w.grid_lats.length-1,Math.round((la-w.grid_lats[0])/(w.grid_lats[w.grid_lats.length-1]-w.grid_lats[0])*(w.grid_lats.length-1))));
-        const bi=Math.max(0,Math.min(w.grid_lons.length-1,Math.round((lo-w.grid_lons[0])/(w.grid_lons[w.grid_lons.length-1]-w.grid_lons[0])*(w.grid_lons.length-1))));
-        spd=w.speed[wk][ai][bi]; dir=w.dir[wk][ai][bi];
-      }
-      const rad=(dir+180)*Math.PI/180;                   // le panache part sous le vent
-      const ux=Math.sin(rad), uy=Math.cos(rad);
-      const stepDeg=0.004+spd*0.0035;
-      for(let st=0;st<4;st++){
-        const pla=la+uy*stepDeg*st, plo=lo+ux*stepDeg*st*1.35;
-        const cx=Math.round((plo-lo0)/(lo1-lo0)*(AIRW-1));
-        const cy=Math.round((1-(pla-la0)/(la1-la0))*(AIRH-1));
-        const amp=[40,28,18,10][st]*wgt*step;
-        const rr=1+st;                                    // le panache s'élargit
-        for(let dy=-rr;dy<=rr;dy++)for(let dx=-rr;dx<=rr;dx++){
-          const X=cx+dx,Y=cy+dy;
-          if(X<0||X>=AIRW||Y<0||Y>=AIRH) continue;
-          fine[Y*AIRW+X]+=amp*Math.exp(-(dx*dx+dy*dy)/(rr*rr+1));
-        }
+  // panache du feu SIMULÉ : nappe de fumée transportée (advection+accumulation,
+  // calculée côté serveur) — même logique qu'un modèle de dispersion
+  if(f.kind==='sim'&&f.smoke){
+    const sm=f.smoke, snr=sm.length, snc=sm[0].length;
+    const sb=(state.sim&&state.sim.smoke_bbox)||[44.45,-1.45,45.20,-0.35];
+    const[sla0,slo0,sla1,slo1]=sb;
+    for(let y=0;y<AIRH;y++){
+      const la=la1-(y/(AIRH-1))*(la1-la0);
+      const gy=(sla1-la)/(sla1-sla0)*(snr-1);
+      if(gy<0||gy>snr-1) continue;
+      const i0=Math.min(Math.floor(gy),snr-2), ty=gy-i0;
+      for(let x=0;x<AIRW;x++){
+        const lo=lo0+(x/(AIRW-1))*(lo1-lo0);
+        const gx=(lo-slo0)/(slo1-slo0)*(snc-1);
+        if(gx<0||gx>snc-1) continue;
+        const j0=Math.min(Math.floor(gx),snc-2), tx=gx-j0;
+        fine[y*AIRW+x]+=sm[i0][j0]*(1-ty)*(1-tx)+sm[i0+1][j0]*ty*(1-tx)
+                       +sm[i0][j0+1]*(1-ty)*tx+sm[i0+1][j0+1]*ty*tx;
       }
     }
   }
