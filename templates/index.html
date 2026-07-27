@@ -76,11 +76,15 @@
       animation:rot 1s linear infinite;margin:0 auto 14px}
     @keyframes rot{to{transform:rotate(360deg)}}
 
-    .vegtoggle{position:fixed;z-index:1000;right:8px;top:calc(env(safe-area-inset-top) + 52px);
-      pointer-events:auto;background:rgba(0,0,0,.55);border:1px solid var(--line);border-radius:20px;
-      padding:6px 11px;font-size:12px;font-weight:600;color:var(--muted);cursor:pointer;user-select:none}
-    .vegtoggle.on{background:rgba(46,125,50,.85);border-color:#2e7d32;color:#fff}
-    @media(min-width:820px){.vegtoggle{top:110px}}
+    .layers{position:fixed;z-index:1000;right:8px;top:calc(env(safe-area-inset-top) + 52px);
+      display:flex;flex-direction:column;gap:5px;align-items:flex-end;pointer-events:auto}
+    .lyr{background:rgba(0,0,0,.55);border:1px solid var(--line);border-radius:20px;
+      padding:5px 10px;font-size:11.5px;font-weight:600;color:var(--muted);cursor:pointer;user-select:none;white-space:nowrap}
+    .lyr.on{background:rgba(46,125,50,.85);border-color:#2e7d32;color:#fff}
+    #trafBtn.on{background:rgba(198,40,40,.85);border-color:#c62828}
+    #airBtn.on{background:rgba(2,119,189,.9);border-color:#0277bd}
+    #staBtn.on{background:rgba(198,40,40,.85);border-color:#c62828}
+    @media(min-width:820px){.layers{top:110px}}
     .leaflet-bottom.leaflet-left{bottom:calc(var(--tl-h) + 4px)}
     .legend{background:rgba(0,0,0,.6);border-radius:8px;padding:6px 9px;font-size:11px;line-height:1.7;color:#eee}
     .legend i{display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:6px;vertical-align:-1px}
@@ -107,7 +111,11 @@
     <div class="live"><span class="dot"></span><span id="liveTxt">en direct</span></div>
   </div>
 
-  <div class="vegtoggle" id="vegBtn" onclick="toggleVeg()">🌲 Végétation</div>
+  <div class="layers">
+    <div class="lyr" id="vegBtn" onclick="toggleVeg()">🌲 Végétation</div>
+    <div class="lyr" id="trafBtn" onclick="toggleLayer('traffic')">🚦 Trafic</div>
+    <div class="lyr" id="airBtn" onclick="toggleLayer('aircraft')">✈️ Bombardiers</div>
+  </div>
 
   <div class="panel collapsed" id="panel">
     <div class="panel-head" onclick="togglePanel()">
@@ -176,6 +184,7 @@ async function boot(){
     renderStats();
     fitToFire();
     setMode('past');
+    toggleVeg();   // vegetation always on by default
     $('loading').classList.add('hide');
   }catch(e){ $('loading').innerHTML='<div>Erreur de chargement.<br><small>'+e+'</small></div>'; }
 }
@@ -200,10 +209,28 @@ function renderStats(){
     <div class="stat"><div class="l">🔴 Foyers actifs (5 j)</div><div class="v">${fp.n_hotspots}</div></div>
     <div class="stat"><div class="l">💨 Vent moyen (24 h)</div><div class="v">${avgS.toFixed(1)} m/s ${dirLabel(avgD)}</div></div>
     <div class="stat ${away?'ok':'warn'}"><div class="l">⚠️ Risque Bordeaux</div><div class="v">${away?'Faible':'À surveiller'}</div></div>
-    <div class="stat" style="grid-column:1/-1"><div class="l">🛰️ Dernier passage satellite</div><div class="v">${lastDet?fmtT(lastDet)+' ('+ago(lastDet)+')':'—'}</div></div>`;
+    <div class="stat" style="grid-column:1/-1"><div class="l">🛰️ Dernier passage satellite</div><div class="v">${lastDet?fmtT(lastDet)+' ('+ago(lastDet)+')':'—'}</div></div>
+    ${airTile(d.air)}`;
   $('src').innerHTML=`Foyers : NASA FIRMS ${sats?'('+sats+')':''} · Météo : Open-Meteo · Végétation : NDVI MODIS<br>Surveillance actualisée chaque heure · dernière vérif : ${fmtT(d.timestamp+'Z')}`;
 }
 function dirLabel(d){const dirs=['N','NE','E','SE','S','SO','O','NO'];return 'de '+dirs[Math.round(d/45)%8];}
+const fmt=v=>v==null?'—':Math.round(v);
+function aqiInfo(a){
+  if(a==null) return {t:'—',c:''};
+  if(a<=20) return {t:'Bon',c:'ok'};
+  if(a<=40) return {t:'Correct',c:'ok'};
+  if(a<=60) return {t:'Moyen',c:'warn'};
+  if(a<=80) return {t:'Mauvais',c:'warn'};
+  if(a<=100) return {t:'Très mauvais',c:'fire'};
+  return {t:'Extrême',c:'fire'};
+}
+function airTile(air){
+  if(!air) return '';
+  const i=aqiInfo(air.aqi);
+  return `<div class="stat ${i.c}" style="grid-column:1/-1"><div class="l">🌫️ Qualité de l'air (Bordeaux)</div>`+
+    `<div class="v">${i.t}${air.aqi!=null?' · indice '+Math.round(air.aqi):''}</div>`+
+    `<div class="l" style="margin-top:4px">PM2.5 ${fmt(air.pm2_5)} · PM10 ${fmt(air.pm10)} · CO ${fmt(air.co)} µg/m³</div></div>`;
+}
 
 function setMode(m){
   state.mode=m; state.idx=0; stop();
@@ -287,6 +314,59 @@ function toggleVeg(){
     {opacity:.6,interactive:false}).addTo(map);
   btn.classList.add('on');
 }
+
+// ---- ground/response layers (stations, traffic, aircraft) ----
+const LYR={
+  traffic :{btn:'trafBtn',layer:L.layerGroup(), url:'/api/traffic',  refresh:90, draw:drawTraffic},
+  aircraft:{btn:'airBtn', layer:L.layerGroup(), url:'/api/aircraft', refresh:45, draw:drawAircraft},
+};
+async function loadLayer(name){
+  const L0=LYR[name];
+  try{ const data=await fetch(L0.url).then(r=>r.json()); L0.layer.clearLayers(); L0.draw(data,L0.layer); }
+  catch(e){}
+}
+function toggleLayer(name){
+  const L0=LYR[name], btn=$(L0.btn);
+  if(map.hasLayer(L0.layer)){
+    map.removeLayer(L0.layer); btn.classList.remove('on');
+    if(L0.timer){clearInterval(L0.timer);L0.timer=null;}
+  }else{
+    L0.layer.addTo(map); btn.classList.add('on'); loadLayer(name);
+    if(L0.refresh) L0.timer=setInterval(()=>loadLayer(name), L0.refresh*1000);
+  }
+}
+function drawStations(d,layer){
+  (d.stations||[]).forEach(s=>{
+    const ic=L.divIcon({className:'',iconSize:[20,20],html:'<div style="font-size:15px;filter:drop-shadow(0 1px 2px #000)">🚒</div>'});
+    L.marker([s.lat,s.lon],{icon:ic,interactive:true}).bindTooltip(s.name).addTo(layer);
+  });
+}
+function drawTraffic(d,layer){
+  const style={FLUIDE:{color:'#2e7d32',weight:2,opacity:.5},
+    DENSE:{color:'#ff9800',weight:5,opacity:.9},EMBOUTEILLE:{color:'#d50000',weight:6,opacity:.95}};
+  (d.segments||[]).forEach(s=>{
+    const st=style[s.etat]||style.FLUIDE;
+    L.polyline(s.coords,{...st}).bindTooltip(`${s.voie||''} — ${s.etat.toLowerCase()}`).addTo(layer);
+  });
+  const bad=(d.segments||[]).filter(s=>s.etat!=='FLUIDE').length;
+  if(bad) log(`🚦 ${bad} tronçon(s) dense/embouteillé`);
+}
+function drawAircraft(d,layer){
+  const air=d.aircraft||[];
+  if(!air.length){
+    L.tooltip({permanent:true,direction:'center',className:'noair'})
+      .setLatLng([44.6,-0.9]).setContent('Aucun bombardier en vol').addTo(layer);
+    return;
+  }
+  air.forEach(a=>{
+    const rot=(a.heading||0);
+    const col=a.fire?'#d50000':'#0277bd';
+    const ic=L.divIcon({className:'',iconSize:[24,24],
+      html:`<div style="transform:rotate(${rot}deg);color:${col};font-size:20px;filter:drop-shadow(0 1px 2px #000)">✈️</div>`});
+    L.marker([a.lat,a.lon],{icon:ic}).bindTooltip(`${a.callsign}${a.alt?' · '+a.alt+' m':''}`).addTo(layer);
+  });
+}
+function log(){}  // placeholder (no-op narrator)
 
 const legend=L.control({position:'bottomleft'});
 legend.onAdd=function(){const d=L.DomUtil.create('div','legend');

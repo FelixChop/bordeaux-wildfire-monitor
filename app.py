@@ -247,6 +247,29 @@ def fetch_vegetation():
 _wind_field = None
 
 
+def fetch_air_quality():
+    """Air quality at Bordeaux (Open-Meteo) — smoke particles & gases."""
+    try:
+        r = requests.get("https://air-quality-api.open-meteo.com/v1/air-quality", params={
+            'latitude': 44.84, 'longitude': -0.58, 'timezone': 'UTC',
+            'current': 'pm2_5,pm10,carbon_monoxide,nitrogen_dioxide,ozone,'
+                       'sulphur_dioxide,european_aqi',
+        }, timeout=15)
+        if r.status_code != 200:
+            return None
+        c = r.json().get('current', {})
+        return {
+            'aqi': c.get('european_aqi'),
+            'pm2_5': c.get('pm2_5'), 'pm10': c.get('pm10'),
+            'co': c.get('carbon_monoxide'), 'no2': c.get('nitrogen_dioxide'),
+            'o3': c.get('ozone'), 'so2': c.get('sulphur_dioxide'),
+            'time': c.get('time'),
+        }
+    except Exception as e:
+        print(f"Air quality error: {e}")
+        return None
+
+
 def update_data():
     """Background thread: fetch latest data periodically."""
     global latest_data, last_update, _wind_field
@@ -286,7 +309,8 @@ def update_data():
                     'n_hotspots': len(firms['hotspots'])
                 },
                 'firms': firms,
-                'wind': wind
+                'wind': wind,
+                'air': fetch_air_quality(),
             }
 
             last_update = datetime.utcnow()
@@ -637,6 +661,110 @@ def api_data():
     if latest_data:
         return jsonify(latest_data)
     return jsonify({'error': 'No data available'}), 503
+
+# ---------------------------------------------------------------------------
+# Ground / response layers: fire stations, water bombers, road traffic.
+# ---------------------------------------------------------------------------
+_layer_cache = {}
+
+
+def _cached(key, ttl, producer):
+    """Tiny TTL cache; on producer failure, serve the last good value if any."""
+    now = time.time()
+    ent = _layer_cache.get(key)
+    if ent and now - ent[0] < ttl:
+        return ent[1]
+    try:
+        val = producer()
+    except Exception as e:
+        print(f"layer {key} error: {e}")
+        val = None
+    if val is not None:
+        _layer_cache[key] = (now, val)
+        return val
+    return ent[1] if ent else None
+
+
+@app.route('/api/stations')
+def api_stations():
+    """Fire stations (fixed) from OpenStreetMap — response means nearby."""
+    def prod():
+        q = ('[out:json][timeout:25];('
+             'node["amenity"="fire_station"](44.4,-1.6,45.4,-0.2);'
+             'way["amenity"="fire_station"](44.4,-1.6,45.4,-0.2);'
+             ');out center;')
+        r = requests.get("https://overpass-api.de/api/interpreter",
+                         params={'data': q},
+                         headers={'User-Agent': 'wildfire-app/1.0 (felixrevert@gmail.com)'},
+                         timeout=35)
+        if r.status_code != 200:
+            return None
+        out = []
+        for e in r.json().get('elements', []):
+            lat = e.get('lat') or (e.get('center') or {}).get('lat')
+            lon = e.get('lon') or (e.get('center') or {}).get('lon')
+            if lat and lon:
+                out.append({'lat': lat, 'lon': lon,
+                            'name': e.get('tags', {}).get('name', 'Caserne')})
+        return out
+    return jsonify({'stations': _cached('stations', 86400, prod) or []})
+
+
+@app.route('/api/traffic')
+def api_traffic():
+    """Live road traffic (Bordeaux Métropole) — congestion & blockages."""
+    def prod():
+        r = requests.get(
+            "https://opendata.bordeaux-metropole.fr/api/records/1.0/search/",
+            params={'dataset': 'ci_trafi_l', 'rows': 1000}, timeout=20)
+        if r.status_code != 200:
+            return None
+        out, updated = [], None
+        for rec in r.json().get('records', []):
+            f = rec.get('fields', {})
+            etat = f.get('etat')
+            if etat in (None, 'INCONNU'):
+                continue
+            gs = f.get('geo_shape', {})
+            if gs.get('type') != 'LineString':
+                continue
+            out.append({'etat': etat,
+                        'coords': [[c[1], c[0]] for c in gs['coordinates']],
+                        'voie': f.get('ident')})
+            updated = f.get('mdate') or updated
+        return {'segments': out, 'updated': updated}
+    data = _cached('traffic', 120, prod) or {'segments': [], 'updated': None}
+    return jsonify(data)
+
+
+@app.route('/api/aircraft')
+def api_aircraft():
+    """Low-flying aircraft (OpenSky ADS-B) — water bombers when a fire is active."""
+    def prod():
+        r = requests.get("https://opensky-network.org/api/states/all",
+                         params={'lamin': 44.2, 'lomin': -1.7,
+                                 'lamax': 45.5, 'lomax': -0.2}, timeout=15)
+        if r.status_code != 200:
+            return None
+        fire_kw = ('PELICAN', 'PELIC', 'MILAN', 'FIRE', 'DRAGON', 'CANADAIR', 'BOMB')
+        out = []
+        for s in r.json().get('states') or []:
+            cs = (s[1] or '').strip()
+            lon, lat, baro, vel, trk, geo = s[5], s[6], s[7], s[9], s[10], s[13]
+            if lat is None or lon is None:
+                continue
+            alt = baro if baro is not None else geo
+            is_fire = any(k in cs.upper() for k in fire_kw)
+            # exclude airliners around Bordeaux-Mérignac airport (44.83, -0.70)
+            near_airport = ((lat - 44.83) ** 2 + (lon + 0.70) ** 2) ** 0.5 < 0.14
+            low_working = (alt is not None and alt < 1800 and not near_airport)
+            if is_fire or low_working:
+                out.append({'callsign': cs or '—', 'lat': lat, 'lon': lon,
+                            'alt': round(alt) if alt is not None else None,
+                            'heading': trk, 'fire': is_fire})
+        return out
+    return jsonify({'aircraft': _cached('aircraft', 45, prod) or []})
+
 
 # Start background data fetch thread at import time so it also runs under
 # gunicorn (which never executes the __main__ block). update_data() does its
