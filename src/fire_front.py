@@ -161,6 +161,12 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
     ign = np.full((nrows, ncols), -1, dtype=np.int16)
     residual = np.zeros((nrows, ncols))
     meta = [] if want_meta else None
+    # Firefighting state: containment (held control lines on the fire edge)
+    # + preventive fuel breaks cut AHEAD of the front (dozers, farmers felling
+    # trees, tactical burns). One user knob scales everything: supp_level.
+    supp_level = sc.get('supp_level', 1.0)
+    contained = np.zeros((nrows, ncols), dtype=bool)
+    _ones33 = np.ones((3, 3), dtype=bool)
 
     for h in range(n_hours):
         d_extra = dir_off + (float(dir_noise[h]) if dir_noise is not None else 0.0)
@@ -201,7 +207,7 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
             # and varies between ensemble runs. Nominal peak: ~75 % ROS cut.
             ramp = min(1.0, h / 18.0)
             wind_pen = np.clip(1.15 - speed / 14.0, 0.25, 1.0)
-            eff = np.clip(supp_base * supp_mult * ramp * wind_pen, 0.0, 0.95)
+            eff = np.clip(supp_base * sc.get('supp_level', 1.0) * supp_mult * ramp * wind_pen, 0.0, 0.95)
             ros = ros * (1.0 - eff)
         residual += ros * 60.0
 
@@ -215,7 +221,7 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
             grew = np.zeros_like(burned)
             for di, dj, ex, ny in dom['nbr']:
                 push = (pe_u * ex + pn_u * ny) >= 0.25
-                src = burned & ready & push
+                src = burned & ready & push & ~contained
                 if not src.any():
                     continue
                 grew |= _shift(src, di, dj) & ~burned & (fuel_grid > 0)
@@ -233,9 +239,9 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
         # the front) + pyroCb long throws (2-8 km) when a fire storm is active.
         pyro_rate = float(spot_h[h]) if spot_h is not None else spot_rate
         if rng is not None:
-            recent = burned & (ign >= h - 3)
+            recent = burned & (ign >= h - 3) & ~contained
             if h < 3:
-                recent = recent | dom['seed_mask']
+                recent = recent | (dom['seed_mask'] & ~contained)
             fr_r, fr_c = np.where(recent)
             if len(fr_r):
                 for rate, dmin, dmax in ((pyro_rate, 2000, 8000), (0.35, 300, 1500)):
@@ -254,6 +260,45 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
                                 and not burned[rr, cc] and fuel_grid[rr, cc] > 0.2):
                             burned[rr, cc] = True
                             ign[rr, cc] = h
+
+        # --- Active firefighting (capacity-limited) -------------------------
+        if suppression and rng is not None:
+            ramp_c = min(1.0, h / 18.0)
+            # (a) CONTAINMENT: crews hold sections of the fire edge. Capacity
+            # ~4 cells/h (≈2 km of line) at normal strength, easier where the
+            # local wind is weak (flanks/rear), and it HOLDS once set.
+            cap = 4.0 * supp_level * supp_mult * ramp_c
+            n_cont = int(cap) + (1 if rng.random() < (cap % 1.0) else 0)
+            if n_cont > 0:
+                edge = burned & ~contained & binary_dilation(~burned & (fuel_grid > 0), _ones33)
+                er, ec = np.where(edge)
+                if len(er):
+                    w = np.clip(1.15 - speed[er, ec] / 14.0, 0.1, 1.0)
+                    w = w / w.sum()
+                    pick = rng.choice(len(er), size=min(n_cont, len(er)),
+                                      replace=False, p=w)
+                    contained[er[pick], ec[pick]] = True
+            # (b) PREVENTIVE FUEL BREAKS ahead of the head: every 6 h, dozers
+            # and farmers cut a line downwind of the most advanced burning
+            # cell (élagage, tranchées, feux tactiques -> fuel quasi nul).
+            if h >= 8 and h % 6 == 0:
+                act_r, act_c = np.where(burned & ~contained)
+                if len(act_r):
+                    ue_m = float(pe_u[act_r, act_c].mean())
+                    vn_m = float(pn_u[act_r, act_c].mean())
+                    proj = act_r * (-vn_m) + act_c * ue_m   # row axis points south
+                    i_head = int(np.argmax(proj))
+                    hr, hc = int(act_r[i_head]), int(act_c[i_head])
+                    cr = hr - int(round(vn_m * 4))          # ~2 km devant la tête
+                    cc = hc + int(round(ue_m * 4))
+                    half = max(2, int(round(4 * supp_level * ramp_c)))
+                    # ligne perpendiculaire à la direction de propagation
+                    px, py = -vn_m, -ue_m
+                    for t in range(-half, half + 1):
+                        rr2 = cr + int(round(py * t))
+                        cc2 = cc + int(round(px * t))
+                        if 0 <= rr2 < nrows and 0 <= cc2 < ncols:
+                            fuel_grid[rr2, cc2] *= 0.08
 
         if want_meta:
             m = burned
@@ -349,7 +394,7 @@ def simulate_monte_carlo(hotspots, wind_records, wind_field=None, veg_fuel=None,
 
 def simulate_ensemble(hotspots, wind_records, wind_field=None, veg_fuel=None,
                       veg_bbox=None, max_hours=168, n_runs=12, rng_seed=0,
-                      pyro_daily_p=0.07):   # P(≥1 pyroCb sur 7 j) ≈ 40 %
+                      pyro_daily_p=0.07, scenario=None):
     if binary_dilation is None:
         return None
     dom = _prepare_domain(hotspots, veg_fuel, veg_bbox)
@@ -393,7 +438,8 @@ def simulate_ensemble(hotspots, wind_records, wind_field=None, veg_fuel=None,
         pert['cal_h'] = cal_arr
         pert['spot_h'] = spot_arr
         ign, m, n_hours = _run_once(dom, wind_field, wind_records, max_hours,
-                                    pert, want_meta=(k == 0), suppression=True)
+                                    pert, want_meta=(k == 0), suppression=True,
+                                    scenario=scenario)
         igns.append(ign)
         pyro_flags.append(pyro_any)
         if k == 0:

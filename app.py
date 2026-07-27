@@ -565,44 +565,42 @@ def _sim_inputs():
     return active, wind, wf, _veg_cache.get('fuel'), now_key
 
 
-_ens_store = {'ver': None, 'views': {}}
+_LUTTE = {'low': 0.5, 'med': 1.0, 'high': 1.6}
+_ens_store = {l: {'ver': None, 'views': {}, 'store': None} for l in _LUTTE}
 _VIEWS = ('ref', 'opt', 'pess', 'pyro')
 
 
-def compute_ensemble():
-    """One honest ensemble; all views derived from it. Background-heavy."""
-    if not latest_data:
+def compute_ensemble(lutte='med'):
+    """One honest ensemble per firefighting level; views derived from it."""
+    if not latest_data or lutte not in _LUTTE:
         return None
     from src.fire_front import simulate_ensemble, derive_view
-    ver = f"v6:{last_update}:{datetime.utcnow().strftime('%dT%H')}"
-    if _ens_store['ver'] == ver:
-        return _ens_store['views']
+    ent = _ens_store[lutte]
+    ver = f"v7:{last_update}:{datetime.utcnow().strftime('%dT%H')}"
+    if ent['ver'] == ver:
+        return ent['views']
     if not _sim_lock.acquire(blocking=False):
-        return _ens_store['views'] or None
+        return ent['views'] or None
     try:
-        if _ens_store['ver'] == ver:
-            return _ens_store['views']
+        if ent['ver'] == ver:
+            return ent['views']
         hotspots, wind, wf, fuel, _ = _sim_inputs()
         store = simulate_ensemble(
             hotspots, wind, wind_field=wf, veg_fuel=fuel, veg_bbox=SIM_BBOX,
-            max_hours=168, n_runs=int(os.getenv('ENS_RUNS', '16')))
+            max_hours=168, n_runs=int(os.getenv('ENS_RUNS', '16')),
+            scenario={'supp_level': _LUTTE[lutte]})
         store['smoke_k'] = calibrate_smoke_k()   # ancré sur le panache RÉEL
         views = {}
         for v in _VIEWS:
-            d = derive_view(store, v)
-            for f in d.get('frames', []):
-                ts = f.get('timestamp')
-                if ts and not ts.endswith('Z'):
-                    f['timestamp'] = ts + 'Z'
-            views[v] = d
-        _ens_store['views'] = views
-        _ens_store['store'] = store   # gardé pour dériver les tirages 'mK'
-        _ens_store['ver'] = ver
-        _warm_save('views.json', {'ver': ver, 'views': views})
-        print(f"✓ Ensemble {ver}: {len(views)} vues prêtes")
+            views[v] = _normalize_ts(derive_view(store, v))
+        ent['views'] = views
+        ent['store'] = store   # gardé pour dériver les tirages 'mK'
+        ent['ver'] = ver
+        _warm_save(f'views_{lutte}.json', {'ver': ver, 'views': views})
+        print(f"✓ Ensemble lutte={lutte} {ver}: {len(views)} vues prêtes")
     finally:
         _sim_lock.release()
-    return _ens_store['views']
+    return ent['views']
 
 
 def _normalize_ts(d):
@@ -618,22 +616,34 @@ def api_scenario():
     """Ensemble views: ?view=ref (défaut) | opt | pess | pyro."""
     if not latest_data:
         return jsonify({'error': 'No data available'}), 503
-    views = _ens_store['views'] or compute_ensemble()
+    lutte = request.args.get('lutte', 'med')
+    if lutte not in _LUTTE:
+        lutte = 'med'
+    ent = _ens_store[lutte]
+    views = ent['views'] or compute_ensemble(lutte)
     view = request.args.get('view', 'ref')
     if not (view in _VIEWS or (view.startswith('m') and view[1:].isdigit())):
         view = 'ref'
     data = (views or {}).get(view)
-    if data is None and views is not None and _ens_store.get('store') is not None:
+    if data is None and views is not None and ent.get('store') is not None:
         # tirage individuel 'mK' : dérivé à la demande puis mis en cache
         from src.fire_front import derive_view
-        data = _normalize_ts(derive_view(_ens_store['store'], view))
+        data = _normalize_ts(derive_view(ent['store'], view))
         views[view] = data
+    if data is not None:
+        data = dict(data); data['lutte'] = lutte
     return jsonify(data if data else {'error': 'Computing'}), (200 if data else 503)
 
 
 def compute_simulation():
-    """Background precompute: the single ensemble + its 4 views."""
-    return compute_ensemble()
+    """Background precompute: one ensemble per firefighting level."""
+    out = compute_ensemble('med')
+    for l in ('low', 'high'):
+        try:
+            compute_ensemble(l)
+        except Exception as e:
+            print(f"ensemble lutte={l} erreur: {e}")
+    return out
 
 
 def _obsolete_compute_simulation():
@@ -703,7 +713,7 @@ def api_simulation():
     """Compat: serves the reference view of the ensemble."""
     if not latest_data:
         return jsonify({'error': 'No data available'}), 503
-    views = _ens_store['views'] or compute_ensemble()
+    views = _ens_store['med']['views'] or compute_ensemble('med')
     data = (views or {}).get('ref')
     return jsonify(data if data else {'error': 'Computing'}), (200 if data else 503)
 
@@ -1385,11 +1395,12 @@ if _w and _w.get('latest'):
     except (KeyError, ValueError):
         last_update = datetime.utcnow()
     print("✓ Warm cache: données servies depuis le disque")
-_w = _warm_load('views.json')
-if _w and _w.get('views'):
-    _ens_store['views'] = _w['views']
-    _ens_store['ver'] = _w.get('ver')   # même heure => pas de recalcul inutile
-    print("✓ Warm cache: ensemble servi depuis le disque")
+for _l in _LUTTE:
+    _w = _warm_load(f'views_{_l}.json')
+    if _w and _w.get('views'):
+        _ens_store[_l]['views'] = _w['views']
+        _ens_store[_l]['ver'] = _w.get('ver')
+        print(f"✓ Warm cache: ensemble lutte={_l} servi depuis le disque")
 del _w
 
 # Start background data fetch thread at import time so it also runs under

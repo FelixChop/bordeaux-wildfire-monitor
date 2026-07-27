@@ -149,8 +149,10 @@
     @keyframes storm{0%,100%{transform:scale(1);opacity:.85}50%{transform:scale(1.25);opacity:1}}
     /* mode simulation : voile bleuté + badge, mêmes couleurs de feu */
     .simveil{position:fixed;inset:0;z-index:600;pointer-events:none;display:none;
-      box-shadow:inset 0 0 160px 50px rgba(2,136,209,.30)}
+      box-shadow:inset 0 0 0 4px rgba(79,195,247,.75), inset 0 0 120px 30px rgba(2,60,110,.35)}
     body.simmode .simveil{display:block}
+    body.simmode #map{filter:hue-rotate(-14deg) saturate(.82) brightness(.94)}
+    #map{transition:filter .35s}
     .simbadge{position:fixed;z-index:1100;top:calc(env(safe-area-inset-top) + 10px);
       left:8px;display:none;background:rgba(2,119,189,.88);
       color:#fff;font-weight:800;font-size:10.5px;letter-spacing:1.5px;
@@ -200,6 +202,13 @@
       <div class="dash-note" id="dashNote">L'incertitude vient de ce qui est vraiment imprévisible :
         le <b>vent</b> (croissante avec l'échéance), le <b>pyroCb</b> (aléatoire), l'efficacité de la
         <b>lutte</b>. Température &amp; sécheresse = données observées / prévues.</div>
+
+      <h3>🚒 Moyens de lutte <span class="mh-sub">(pompiers + agriculteurs : lignes tenues, largages, tranchées, élagage, feux tactiques)</span></h3>
+      <div class="views" style="grid-template-columns:1fr 1fr 1fr" id="luttes">
+        <b data-l="low">Réduits</b>
+        <b data-l="med" class="on">Normaux</b>
+        <b data-l="high">Renforcés</b>
+      </div>
 
       <h3>📊 Situation en direct</h3>
       <div class="grid" id="stats"></div>
@@ -285,7 +294,7 @@ async function boot(){
     const data=await getJSON('/api/data');           // wait until data is warm
     const [past,sim,wind,meteo,airF]=await Promise.all([
       getJSON('/api/fire-history'),
-      getJSON('/api/scenario',60),          // défaut : tout à "med"
+      getJSON('/api/scenario?view=ref&lutte=med',60),
       getJSON('/api/windfield').catch(()=>null),
       fetch('/api/meteosat').then(r=>r.json()).catch(()=>null),
       fetch('/api/air-field').then(r=>r.ok?r.json():null).catch(()=>null)
@@ -390,12 +399,16 @@ function buildTimeline(){
 }
 
 // ---- ensemble view selector ----
-state.view='ref';
+state.view='ref'; state.lutte='med';
 state.scen={pyro:'low'};   // compat pour l'illustration pyroCb
 function initDash(){
   document.querySelectorAll('#views b').forEach(b=>{
     b.classList.toggle('on', b.dataset.v===state.view);
     b.onclick=()=>setView(b.dataset.v);
+  });
+  document.querySelectorAll('#luttes b').forEach(b=>{
+    b.classList.toggle('on', b.dataset.l===state.lutte);
+    b.onclick=()=>{state.lutte=b.dataset.l; setView(state.view);};
   });
 }
 function toggleMenu(){
@@ -427,7 +440,7 @@ async function setView(v){
   initDash();
   $('computing').style.display='flex';
   try{
-    const sim=await getJSON('/api/scenario?view='+v, 40);
+    const sim=await getJSON('/api/scenario?view='+v+'&lutte='+state.lutte, 40);
     state.sim=sim;
     state.scen.pyro=(v==='pyro'||sim.member_pyro)?'high':'low';
     if($('menu').style.display!=='none') toggleMenu();
@@ -481,10 +494,8 @@ function ageStyle(age,frp){
   return       {col:'#7f0000',op:.32,r:Math.max(base-2,2)}; // braise mourante
 }
 const SCAR={col:'#141414',op:.55,r:3};   // végétation brûlée
-function drawPoint(p,st,layer,simulated){
-  // simulation : MÊMES couleurs que le réel, mais liseré cyan fin
-  L.circleMarker([p.lat,p.lon],{radius:st.r,
-    color:simulated?'#4dd0ff':st.col,weight:simulated?1.1:.5,
+function drawPoint(p,st,layer){
+  L.circleMarker([p.lat,p.lon],{radius:st.r,color:st.col,weight:.5,
     fillColor:st.col,fillOpacity:st.op}).addTo(layer);
 }
 function renderPastFrame(f,i){
@@ -526,7 +537,7 @@ function renderSimFrame(f,i){
     if(age<0) return;
     if(age<6) front.push(p);
     const active=age<state.winH;
-    drawPoint(p, active?ageStyle(age,20):SCAR, simLayer, active); // cicatrices sans liseré
+    drawPoint(p, active?ageStyle(age,20):SCAR, simLayer);
   });
   // PyroCumulonimbus : orages de feu au-dessus du front actif
   if(state.scen.pyro!=='low'&&front.length){
@@ -546,7 +557,8 @@ function renderSimFrame(f,i){
   if(!vEmo&&state.view.startsWith('m'))
     vEmo=`🎲 #${+state.view.slice(1)+1}${state.sim&&state.sim.member_pyro?'⛈️':''}`;
   const day=(vEmo||'')+' '+(j>0?`J+${j} · `:'prévision · ');
-  const tmp=(f.temp_c!=null)?` · air ${f.temp_c}°C`:'';
+  const lut={low:' · 🚒⁻ lutte réduite',high:' · 🚒⁺ lutte renforcée'}[state.lutte]||'';
+  const tmp=((f.temp_c!=null)?` · air ${f.temp_c}°C`:'')+lut;
   const rng=(f.area_p10!=null)?` (${Math.round(f.area_p10/1000)}k–${Math.round(f.area_p90/1000)}k)`:'';
   $('tlInfo').textContent=`${day}${(f.area_ha||0).toLocaleString('fr-FR')} ha${rng} · vent ${f.wind_speed_ms} m/s · ${f.humidity_pct}%${tmp}`;
 }
