@@ -147,10 +147,15 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script>
 const BDX=[44.837,-0.579];
-const map=L.map('map',{zoomControl:false,attributionControl:false,preferCanvas:true}).setView([44.9,-0.9],9);
-L.control.zoom({position:'topleft'}).addTo(map);
+// Vue verrouillée : de l'océan (Lacanau océan) à Bordeaux rive droite.
+const VIEW=L.latLngBounds([[44.60,-1.30],[45.06,-0.48]]);
+const map=L.map('map',{zoomControl:false,attributionControl:false,preferCanvas:true,
+  dragging:false,scrollWheelZoom:false,doubleClickZoom:false,touchZoom:false,
+  boxZoom:false,keyboard:false,zoomSnap:0.1}).fitBounds(VIEW);
 L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{maxZoom:19}).addTo(map);
 L.marker(BDX).addTo(map).bindPopup('Bordeaux');
+function lockView(){ map.fitBounds(VIEW,{padding:[6,6]}); }
+window.addEventListener('resize', ()=>{ clearTimeout(window._rz); window._rz=setTimeout(lockView,200); });
 
 // layers
 let firePts=L.layerGroup().addTo(map);   // past hotspots
@@ -186,7 +191,7 @@ async function boot(){
     ]);
     state.data=data; state.past=past; state.sim=sim; state.wind=wind; state.airHist=airh; state.meteo=meteo;
     renderStats();
-    fitToFire();
+    lockView();
     setMode('past');
     toggleVeg();   // vegetation always on by default
     $('loading').classList.add('hide');
@@ -368,7 +373,7 @@ function toggleLayer(name){
     map.removeLayer(L0.layer); btn.classList.remove('on');
     if(L0.timer){clearInterval(L0.timer);L0.timer=null;}
   }else{
-    L0.layer.addTo(map); btn.classList.add('on'); loadLayer(name, name==='aircraft');
+    L0.layer.addTo(map); btn.classList.add('on'); loadLayer(name);
     if(L0.refresh) L0.timer=setInterval(()=>loadLayer(name), L0.refresh*1000);
   }
 }
