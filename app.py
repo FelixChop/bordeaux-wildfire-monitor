@@ -437,33 +437,46 @@ def _hour_bucket(ts):
         return None
 
 
+ACTIVE_WINDOW_H = 18  # a hotspot is shown "active" for this many hours
+
+
+def _parse_ts(ts):
+    try:
+        return datetime.strptime(ts[:19], '%Y-%m-%dT%H:%M:%S')
+    except (ValueError, TypeError):
+        return None
+
+
 @app.route('/api/fire-history')
 def api_fire_history():
-    """Real FIRMS hotspots grouped into cumulative hourly frames (past fire)."""
+    """Active hotspots on a continuous hourly timeline (sliding window)."""
     if not latest_data:
         return jsonify({'error': 'No data available'}), 503
     hotspots = latest_data['firms'].get('hotspots', [])
-    # bucket by hour
-    buckets = {}
+    pts = []
     for h in hotspots:
-        key = _hour_bucket(h.get('timestamp'))
-        if key:
-            buckets.setdefault(key, []).append({
-                'lat': h['lat'], 'lon': h['lon'], 'frp': h.get('frp', 0.0),
-            })
-    hours = sorted(buckets.keys())
+        dt = _parse_ts(h.get('timestamp'))
+        if dt:
+            pts.append((dt, h['lat'], h['lon'], h.get('frp', 0.0)))
+    pts.sort(key=lambda p: p[0])
+
+    now = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
+    start = now - timedelta(days=5)
+    win = timedelta(hours=ACTIVE_WINDOW_H)
     frames = []
-    cumulative = []
-    for hkey in hours:
-        cumulative = cumulative + buckets[hkey]
+    t = start
+    while t <= now:
+        active = [{'lat': la, 'lon': lo, 'frp': frp}
+                  for (dt, la, lo, frp) in pts if t - win < dt <= t]
         frames.append({
-            'timestamp': hkey,
-            'new': len(buckets[hkey]),
-            'total': len(cumulative),
-            'points': list(cumulative),
+            'timestamp': t.strftime('%Y-%m-%dT%H:00Z'),
+            'active': len(active),
+            'points': active,
         })
+        t += timedelta(hours=1)
     return jsonify({
         'source': latest_data['firms'].get('source'),
+        'now': now.strftime('%Y-%m-%dT%H:00Z'),
         'n_frames': len(frames),
         'frames': frames,
     })
@@ -894,6 +907,37 @@ def api_meteosat():
     if data is None:
         return jsonify({'fires': [], 'time': None, 'available': False})
     return jsonify({**data, 'available': True})
+
+
+@app.route('/api/air-grid')
+def api_air_grid():
+    """Spatial air-quality grid (Open-Meteo) for a coloured-zone overlay."""
+    def prod():
+        n = 7
+        lat0, lat1, lon0, lon1 = 44.55, 45.10, -1.32, -0.46
+        lats = np.linspace(lat0, lat1, n)
+        lons = np.linspace(lon0, lon1, n)
+        laq, loq = [], []
+        for la in lats:
+            for lo in lons:
+                laq.append(round(float(la), 3))
+                loq.append(round(float(lo), 3))
+        r = requests.get('https://air-quality-api.open-meteo.com/v1/air-quality', params={
+            'latitude': ','.join(map(str, laq)), 'longitude': ','.join(map(str, loq)),
+            'current': 'pm2_5,european_aqi', 'timezone': 'UTC'}, timeout=20)
+        if r.status_code != 200:
+            return None
+        res = r.json()
+        if isinstance(res, dict):
+            res = [res]
+        pts = []
+        for idx, x in enumerate(res):
+            c = x.get('current', {})
+            pts.append({'lat': laq[idx], 'lon': loq[idx],
+                        'aqi': c.get('european_aqi'), 'pm25': c.get('pm2_5')})
+        return {'points': pts,
+                'dlat': (lat1 - lat0) / (n - 1), 'dlon': (lon1 - lon0) / (n - 1)}
+    return jsonify(_cached('airgrid', 1800, prod) or {'points': []})
 
 
 @app.route('/api/aircraft-history')

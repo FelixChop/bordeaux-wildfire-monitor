@@ -63,8 +63,17 @@
     .tl-label{display:flex;justify-content:space-between;font-size:11.5px;margin-bottom:4px}
     .tl-label b{color:var(--fire2);font-variant-numeric:tabular-nums}
     .tl-label span{color:var(--muted)}
+    .tl-legend{display:flex;justify-content:space-between;font-size:9.5px;color:var(--muted);margin-top:3px}
+    .tl-legend #tlNow{color:#ff5252}
+    .live-btn{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:1px;
+      background:rgba(198,40,40,.15);border:1px solid #c62828;border-radius:12px;padding:6px 9px;
+      color:#ff5252;font-size:9px;font-weight:700;cursor:pointer;line-height:1}
+    .live-btn span{font-size:9px}
+    .live-btn.on{background:#c62828;color:#fff}
+    /* track: past (warm) up to "now", forecast (cool) after */
     input[type=range]{-webkit-appearance:none;width:100%;height:6px;border-radius:3px;
-      background:linear-gradient(90deg,var(--fire) var(--pct,0%),rgba(255,255,255,.15) var(--pct,0%));outline:none}
+      background:linear-gradient(90deg,#8a3b00 0%,var(--fire) var(--nowpct,50%),
+      #2a3a4a var(--nowpct,50%),#3d5266 100%);outline:none}
     input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;
       background:#fff;border:3px solid var(--fire);cursor:pointer;box-shadow:0 1px 6px rgba(0,0,0,.5)}
     input[type=range]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:#fff;border:3px solid var(--fire);cursor:pointer}
@@ -115,8 +124,8 @@
 
   <div class="layers">
     <div class="lyr" id="vegBtn" onclick="toggleVeg()">🌲 Végétation</div>
+    <div class="lyr" id="airqBtn" onclick="toggleLayer('air')">🌫️ Qualité air</div>
     <div class="lyr" id="trafBtn" onclick="toggleLayer('traffic')">🚦 Trafic</div>
-    <div class="lyr" id="airBtn" onclick="toggleLayer('aircraft')">✈️ Bombardiers</div>
   </div>
 
   <div class="panel collapsed" id="panel">
@@ -131,16 +140,14 @@
   </div>
 
   <div class="timeline">
-    <div class="modes">
-      <div class="mode active" id="mPast" onclick="setMode('past')">🔥 Feu réel (5 j passés)</div>
-      <div class="mode" id="mSim" onclick="setMode('sim')">🧪 Simulation (7 j)</div>
-    </div>
     <div class="tl-row">
       <button class="play" id="play" onclick="togglePlay()">▶</button>
       <div class="tl-main">
         <div class="tl-label"><b id="tlTime">—</b><span id="tlInfo"></span></div>
         <input type="range" id="slider" min="0" max="0" value="0" step="1" oninput="onSlide(this.value)">
+        <div class="tl-legend"><span>◀ 5 j passés (feux actifs)</span><span id="tlNow">● maintenant</span><span>prévision 7 j ▶</span></div>
       </div>
+      <button class="live-btn" id="liveBtn" onclick="goLive()">🔴<span>Direct</span></button>
     </div>
   </div>
 
@@ -162,7 +169,8 @@ let firePts=L.layerGroup().addTo(map);   // past hotspots
 let simLayer=L.layerGroup().addTo(map);   // simulation polygons
 let windLayer=L.layerGroup().addTo(map);  // wind-field arrows
 
-let state={mode:'past', past:null, sim:null, data:null, idx:0, playing:false, timer:null};
+let state={frames:[], nowIdx:0, idx:0, playing:false, timer:null,
+           data:null, wind:null, airHist:null, meteo:null};
 
 const $=id=>document.getElementById(id);
 const fmtT=iso=>{ if(!iso) return '—'; const d=new Date(iso.replace(' ','T'));
@@ -182,25 +190,27 @@ async function getJSON(url, tries=20){
 async function boot(){
   try{
     const data=await getJSON('/api/data');           // wait until data is warm
-    const [past,sim,wind,airh,meteo]=await Promise.all([
+    const [past,sim,wind,meteo]=await Promise.all([
       getJSON('/api/fire-history'),
       getJSON('/api/simulation'),
       getJSON('/api/windfield').catch(()=>null),
-      fetch('/api/aircraft-history').then(r=>r.json()).catch(()=>({positions:[]})),
       fetch('/api/meteosat').then(r=>r.json()).catch(()=>null)
     ]);
-    state.data=data; state.past=past; state.sim=sim; state.wind=wind; state.airHist=airh; state.meteo=meteo;
+    state.data=data; state.wind=wind; state.meteo=meteo;
+    // Unified timeline: 5 days of active hotspots (past) then 7 days of forecast.
+    const pf=(past.frames||[]).map(f=>({kind:'past',...f}));
+    const sf=(sim.frames||[]).map(f=>({kind:'sim',...f}));
+    state.frames=pf.concat(sf);
+    state.nowIdx=Math.max(pf.length-1,0);   // last past frame = "now"
+    const sl=$('slider'); sl.min=0; sl.max=Math.max(state.frames.length-1,0);
+    document.documentElement.style.setProperty('--nowpct',
+      (state.nowIdx/Math.max(state.frames.length-1,1)*100)+'%');
     renderStats();
     lockView();
-    setMode('past');
-    toggleVeg();   // vegetation always on by default
+    toggleVeg();          // vegetation always on by default
+    goLive();             // start at the present
     $('loading').classList.add('hide');
   }catch(e){ $('loading').innerHTML='<div>Erreur de chargement.<br><small>'+e+'</small></div>'; }
-}
-
-function fitToFire(){
-  const pts=(state.past&&state.past.frames.length)?state.past.frames[state.past.frames.length-1].points:[];
-  if(pts.length){ const b=L.latLngBounds(pts.map(p=>[p.lat,p.lon])); b.extend(BDX); map.fitBounds(b,{padding:[50,50]}); }
 }
 
 function renderStats(){
@@ -250,23 +260,15 @@ function airTile(air){
     `<div class="l" style="margin-top:4px">PM2.5 ${fmt(air.pm2_5)} · PM10 ${fmt(air.pm10)} · CO ${fmt(air.co)} µg/m³</div></div>`;
 }
 
-function setMode(m){
-  state.mode=m; state.idx=0; stop();
-  $('mPast').classList.toggle('active',m==='past');
-  $('mSim').classList.toggle('active',m==='sim');
-  const n=(m==='past'?state.past.frames.length:state.sim.frames.length);
-  const sl=$('slider'); sl.max=Math.max(n-1,0); sl.value=n-1; // start at latest
-  $('panelTitle').textContent = m==='past'?'📊 SITUATION':'🧪 SIMULATION';
-  render(n-1);
-}
-
-function onSlide(v){ render(+v); }
+function onSlide(v){ if(state.playing) stop(); render(+v); }
 function render(i){
   i=Math.max(0,Math.min(i, +$('slider').max)); state.idx=i; $('slider').value=i;
-  $('slider').style.setProperty('--pct',(i/Math.max(+$('slider').max,1)*100)+'%');
   firePts.clearLayers(); simLayer.clearLayers(); windLayer.clearLayers();
-  if(state.mode==='past') renderPast(i); else renderSim(i);
+  const f=state.frames[i]; if(!f){ $('tlTime').textContent='—'; return; }
+  $('liveBtn').classList.toggle('on', i===state.nowIdx);
+  if(f.kind==='past') renderPastFrame(f,i); else renderSimFrame(f);
 }
+function goLive(){ if(state.playing) stop(); render(state.nowIdx); }
 
 function windColor(s){ return s<5?'#4caf50':s<10?'#ffd54f':s<15?'#ff9800':'#ff3d00'; }
 function drawWind(i){
@@ -284,60 +286,48 @@ function drawWind(i){
   }
 }
 
-function renderPast(i){
-  const f=state.past.frames[i]; if(!f){ $('tlTime').textContent='Aucune donnée'; return; }
-  f.points.forEach(p=>{
+function renderPastFrame(f,i){
+  (f.points||[]).forEach(p=>{
     const frp=p.frp||0;
     const r=3+Math.min(frp/18,6);
     const col=frp>50?'#d50000':frp>15?'#ff3d00':'#ff6d00';
     L.circleMarker([p.lat,p.lon],{radius:r,color:col,weight:.5,
-      fillColor:col,fillOpacity:.75}).addTo(firePts);
+      fillColor:col,fillOpacity:.8}).addTo(firePts);
   });
-  // near-real-time geostationary fire pixels (Meteosat, ~10 min) — latest image
-  const mf=state.meteo&&state.meteo.fires;
-  if(mf&&mf.length){
-    mf.forEach(p=>{
+  // geostationary fire pixels (Meteosat, ~10 min) — only near "now"
+  if(i>=state.nowIdx-2){
+    (state.meteo&&state.meteo.fires||[]).forEach(p=>{
       L.rectangle([[p.lat-0.018,p.lon-0.024],[p.lat+0.018,p.lon+0.024]],
         {color:'#ffea00',weight:2,fillColor:'#ffea00',fillOpacity:.5})
-        .bindTooltip('Feu détecté Meteosat (~10 min)').addTo(firePts);
+        .bindTooltip('Feu Meteosat (~10 min)').addTo(firePts);
     });
   }
-  // replay recorded water-bomber positions within this hour
-  const ah=state.airHist&&state.airHist.positions;
-  if(ah&&ah.length){
-    const t0=Date.parse(f.timestamp)/1000, t1=t0+3600;
-    ah.filter(a=>a.t>=t0&&a.t<t1).forEach(a=>{
-      const ic=L.divIcon({className:'',iconSize:[22,22],
-        html:`<div style="transform:rotate(${a.hdg||0}deg);color:${a.fire?'#d50000':'#0277bd'};font-size:18px;filter:drop-shadow(0 1px 2px #000)">✈️</div>`});
-      L.marker([a.lat,a.lon],{icon:ic}).bindTooltip(a.cs).addTo(firePts);
-    });
-  }
-  $('tlTime').textContent=fmtT(f.timestamp);
-  $('tlInfo').textContent=`${f.total} foyers cumulés (+${f.new})`;
+  const live=(i===state.nowIdx);
+  $('tlTime').textContent=(live?'● MAINTENANT · ':'')+fmtT(f.timestamp);
+  $('tlInfo').textContent=`${f.active} foyer(s) actif(s)`;
 }
 
-function renderSim(i){
-  const f=state.sim.frames[i]; if(!f){ $('tlTime').textContent='Aucune donnée'; return; }
+function renderSimFrame(f){
   (f.polygons||[]).forEach(poly=>{
     L.polygon(poly,{color:'#ff6d00',weight:1.5,fillColor:'#ff3d00',fillOpacity:.32}).addTo(simLayer);
   });
-  drawWind(f.hour!=null?f.hour:i);
-  $('tlTime').textContent=fmtT(f.timestamp);
+  drawWind(f.hour!=null?f.hour:0);
   const j=Math.floor((f.hour||0)/24);
-  const day=j>0?` · J+${j}`:'';
+  $('tlTime').textContent=`🔮 ${fmtT(f.timestamp)}`;
+  const day=j>0?`J+${j} · `:'prévision · ';
   const tmp=(f.temp_c!=null)?` · ${f.temp_c}°C`:'';
-  $('tlInfo').textContent=`${(f.area_ha||0).toLocaleString('fr-FR')} ha${day} · vent ${f.wind_speed_ms} m/s · ${f.humidity_pct}% hum.${tmp}`;
+  $('tlInfo').textContent=`${day}${(f.area_ha||0).toLocaleString('fr-FR')} ha · vent ${f.wind_speed_ms} m/s · ${f.humidity_pct}% hum.${tmp}`;
 }
 
 function togglePlay(){ state.playing?stop():play(); }
 function play(){
   state.playing=true; $('play').textContent='⏸';
   const max=+$('slider').max;
-  if(state.idx>=max) state.idx=0;
+  if(state.idx>=max) render(0);
   state.timer=setInterval(()=>{
     if(state.idx>=max){ stop(); return; }
     render(state.idx+1);
-  }, state.mode==='sim'?260:180);
+  }, 130);
 }
 function stop(){ state.playing=false; $('play').textContent='▶'; if(state.timer){clearInterval(state.timer);state.timer=null;} }
 
@@ -355,9 +345,24 @@ function toggleVeg(){
 
 // ---- ground/response layers (stations, traffic, aircraft) ----
 const LYR={
+  air     :{btn:'airqBtn',layer:L.layerGroup(), url:'/api/air-grid', refresh:1800, draw:drawAirGrid},
   traffic :{btn:'trafBtn',layer:L.layerGroup(), url:'/api/traffic',  refresh:90, draw:drawTraffic},
-  aircraft:{btn:'airBtn', layer:L.layerGroup(), url:'/api/aircraft', refresh:45, draw:drawAircraft},
 };
+function aqiColor(a){
+  if(a==null) return '#888';
+  if(a<=20) return '#4caf50'; if(a<=40) return '#c0ca33';
+  if(a<=60) return '#ffb300'; if(a<=80) return '#fb8c00';
+  if(a<=100) return '#e53935'; return '#8e24aa';
+}
+function drawAirGrid(d,layer){
+  const pts=d.points||[]; const dla=(d.dlat||0.08)/2, dlo=(d.dlon||0.12)/2;
+  pts.forEach(p=>{
+    if(p.aqi==null&&p.pm25==null) return;
+    L.rectangle([[p.lat-dla,p.lon-dlo],[p.lat+dla,p.lon+dlo]],
+      {stroke:false,fillColor:aqiColor(p.aqi),fillOpacity:.35})
+      .bindTooltip(`Air : indice ${p.aqi!=null?Math.round(p.aqi):'—'} · PM2.5 ${p.pm25!=null?Math.round(p.pm25):'—'}`).addTo(layer);
+  });
+}
 async function loadLayer(name,fit){
   const L0=LYR[name];
   try{
