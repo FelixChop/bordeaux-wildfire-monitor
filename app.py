@@ -360,7 +360,7 @@ def fetch_france_fires():
     map_key = os.getenv('NASA_FIRMS_MAP_KEY', 'DEMO_KEY')
     hotspots = []
     for product in _FIRMS_PRODUCTS:
-        hotspots.extend(_fetch_firms_product(map_key, product, FR_BBOX, days=3))
+        hotspots.extend(_fetch_firms_product(map_key, product, FR_BBOX, days=5))
     # clustering par buckets 0.22° (~20 km) fusionnés en 8-connexité
     from collections import defaultdict
     cell = 0.22
@@ -415,7 +415,8 @@ def fetch_france_fires():
                 continue                     # cluster hors de France
             c['name'] = nm
         kept.append(c)
-    return {'ts': now.strftime('%Y-%m-%dT%H:00Z'), 'clusters': kept}
+    return {'ts': now.strftime('%Y-%m-%dT%H:00Z'), 'clusters': kept,
+            'hotspots': hotspots}
 
 
 @app.route('/api/france-air.png')
@@ -485,7 +486,7 @@ def api_fires():
     data = _cached('france_fires', 3600, fetch_france_fires)
     if data is None:
         return jsonify({'clusters': []}), 503
-    return jsonify(data)
+    return jsonify({'ts': data['ts'], 'clusters': data['clusters']})
 
 
 # ---------------------------------------------------------------------------
@@ -701,10 +702,126 @@ def _get_zone(zid):
     return z
 
 
+FR_SIM_BBOX = (-5.2, 41.2, 9.8, 51.3)
+FRANCE_VIEW = [[41.2, -5.2], [51.3, 9.8]]
+
+
+def _refresh_france_zone(fr):
+    """Construit/rafraîchit la pseudo-zone nationale."""
+    z = ZONES.get('france') or {'id': 'france', 'ens': {}}
+    ZONES['france'] = z
+    try:
+        hotspots = fr.get('hotspots', [])
+        clusters = fr.get('clusters', [])
+        last_ts = max((h['timestamp'] for h in hotspots), default=None)
+        sats = sorted({h.get('sat') for h in hotspots if h.get('sat')})
+        z['lat'], z['lon'] = 46.5, 2.0
+        z['sim_bbox'] = FR_SIM_BBOX
+        z['view'] = FRANCE_VIEW
+        z['name'] = 'France'
+        z['wind_field'] = fetch_wind_field_bbox(FR_SIM_BBOX)
+        z['veg'] = fetch_vegetation_bbox(FR_SIM_BBOX)
+        z['air_field'] = fetch_air_field_bbox(FR_SIM_BBOX)
+        top = clusters[0] if clusters else None
+        z['latest'] = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'zone': {'id': 'france', 'name': 'France', 'view': FRANCE_VIEW,
+                     'sim_bbox': list(FR_SIM_BBOX)},
+            'clusters': clusters,
+            'fire_perimeter': {'centroid': {'lat': 46.5, 'lon': 2.0},
+                               'distance_to_bordeaux_km': None,
+                               'n_hotspots': len(hotspots)},
+            'firms': {'hotspots': hotspots, 'source': 'NASA FIRMS',
+                      'satellites': sats, 'last_detection': last_ts},
+            'wind': {'hourly_wind': []},
+            'air': None,
+            'pyro_watch': (fetch_pyro_watch(top['lat'], top['lon'], hotspots)
+                           if top else None),
+        }
+        wf = z['wind_field']
+        if wf:
+            sp = np.asarray(wf['speed']).mean(axis=(1, 2))
+            dr = np.asarray(wf['dir']).mean(axis=(1, 2))
+            rh = np.asarray(wf['rh']).mean(axis=(1, 2))
+            tp = np.asarray(wf['temp']).mean(axis=(1, 2))
+            z['latest']['wind']['hourly_wind'] = [
+                {'timestamp': t, 'wind_speed_10m_ms': float(sp[i]),
+                 'wind_direction_10m_deg': float(dr[i]),
+                 'relative_humidity_pct': float(rh[i]),
+                 'temperature_c': float(tp[i])}
+                for i, t in enumerate(wf['times'])]
+        z['last_update'] = datetime.utcnow()
+        z['ready'] = True
+        print(f"✓ Zone FRANCE prête : {len(hotspots)} foyers, {len(clusters)} incendies")
+    except Exception as e:
+        print(f"zone france error: {e}")
+
+
+def _france_top_clusters(n=4):
+    fr = _cached('france_fires', 3600, fetch_france_fires) or {}
+    return [c for c in fr.get('clusters', [])
+            if c.get('active') and c.get('frp_24h', 0) >= 150][:n]
+
+
+def compute_france_scenario(view, lutte):
+    """Simulation France = fusion des ensembles locaux des principaux feux."""
+    from src.fire_front import derive_view
+    tops = _france_top_clusters()
+    merged, missing = {}, []
+    meta0, runs_used, pyro_sum = None, [], 0
+    for k, c in enumerate(tops):
+        zid = c['zone']
+        z = ZONES.get(zid)
+        if not z or not z.get('ready'):
+            missing.append(c.get('name') or zid)
+            if not z:
+                _get_zone(zid)
+            continue
+        ent = z['ens'].get(lutte)
+        ver_ok = ent and ent.get('views')
+        if not ver_ok:
+            missing.append(c.get('name') or zid)
+            Thread(target=compute_zone_ensemble, args=(zid, lutte),
+                   daemon=True).start()
+            continue
+        if view.startswith('m') and view[1:].isdigit() and ent.get('store') is not None:
+            vk = f"m{int(view[1:]) % max(ent['views'].get('ref', {}).get('n_runs', 12), 1)}"
+            d = ent['views'].get(vk)
+            if d is None:
+                d = _normalize_ts(derive_view(ent['store'], vk))
+                ent['views'][vk] = d
+        else:
+            d = ent['views'].get(view if view in _VIEWS else 'ref')
+        if not d:
+            continue
+        runs_used.append(d.get('n_runs', 0))
+        pyro_sum += d.get('pyro_runs', 0)
+        for f in d.get('frames', []):
+            h = f['hour']
+            m = merged.setdefault(h, {'hour': h, 'timestamp': f['timestamp'],
+                                      'area_ha': 0, 'area_p10': 0, 'area_p90': 0,
+                                      'new_points': [],
+                                      'wind_speed_ms': f.get('wind_speed_ms'),
+                                      'humidity_pct': f.get('humidity_pct'),
+                                      'temp_c': f.get('temp_c')})
+            m['area_ha'] += f.get('area_ha', 0)
+            m['area_p10'] += f.get('area_p10', 0)
+            m['area_p90'] += f.get('area_p90', 0)
+            m['new_points'].extend(f.get('new_points') or [])
+    frames = [merged[h] for h in sorted(merged)]
+    return {'n_frames': len(frames), 'frames': frames,
+            'n_runs': (min(runs_used) if runs_used else 0),
+            'pyro_runs': pyro_sum, 'view': view, 'lutte': lutte,
+            'n_fires': len(tops) - len(missing), 'computing': missing,
+            'n_seeds': sum(c.get('n_24h', 0) for c in tops)}
+
+
 def _zone_from_req():
     zid = request.args.get('zone', '')
     if not zid or zid == 'gironde':
         return None
+    if zid == 'france':
+        return ZONES.setdefault('france', {'id': 'france', 'ready': False, 'ens': {}})
     return _get_zone(zid)
 
 
@@ -853,6 +970,25 @@ def update_data():
             except Exception as e:
                 print(f"sim precompute error: {e}")
 
+            # ---- mode France : zone nationale + ensembles des top incendies ----
+            try:
+                fr = fetch_france_fires()
+                _layer_cache['france_fires'] = (time.time(), fr)
+                _refresh_france_zone(fr)
+                for c in _france_top_clusters(3):
+                    zz = _get_zone(c['zone'])
+                    for _ in range(40):
+                        if zz.get('ready'):
+                            break
+                        time.sleep(2)
+                    for lv in ('med', 'low', 'high'):
+                        try:
+                            compute_zone_ensemble(zz['id'], lv)
+                        except Exception as e2:
+                            print(f"ens {zz['id']}/{lv} err: {e2}")
+            except Exception as e:
+                print(f"france precompute error: {e}")
+
         except Exception as e:
             print(f"❌ Data fetch error: {e}")
 
@@ -956,7 +1092,7 @@ def generate_map_html():
 def index():
     """Bordeaux map by default; national overview on feux-de-foret.fr."""
     if 'feux-de-foret' in (request.host or ''):
-        return render_template('france.html')
+        return render_template('index.html')   # app unifiée, ZONE=france côté client
     return render_template('index.html')
 
 
@@ -1122,6 +1258,12 @@ def api_scenario():
     if lutte not in _LUTTE:
         lutte = 'med'
     z = _zone_from_req()
+    if z is not None and z.get('id') == 'france':
+        view_f = request.args.get('view', 'ref')
+        if not (view_f in _VIEWS or (view_f.startswith('m') and view_f[1:].isdigit())):
+            view_f = 'ref'
+        data_f = compute_france_scenario(view_f, lutte)
+        return jsonify(data_f), (200 if data_f.get('n_frames') else 503)
     if z is not None:
         if not z.get('ready'):
             return jsonify({'error': 'Zone loading'}), 503
@@ -1880,6 +2022,38 @@ def methodologie():
 def api_communes():
     """Simplified commune boundaries (geo.api.gouv.fr) within the view."""
     z = _zone_from_req()
+    if z is not None and z.get('id') == 'france':
+        def prod_fr():
+            r = requests.get('https://geo.api.gouv.fr/departements',
+                             params={'format': 'geojson', 'geometry': 'contour'},
+                             timeout=60)
+            if r.status_code != 200:
+                return None
+            feats = []
+            for f in r.json().get('features', []):
+                geom = f.get('geometry') or {}
+                polys = geom.get('coordinates') or []
+                if geom.get('type') == 'Polygon':
+                    polys = [polys]
+                outp = []
+                for poly in polys:
+                    rings = []
+                    for ring in poly[:1]:
+                        dec = [[round(x, 3), round(y, 3)]
+                               for i, (x, y) in enumerate(ring) if i % 4 == 0]
+                        if len(dec) >= 4:
+                            if dec[0] != dec[-1]:
+                                dec.append(dec[0])
+                            rings.append(dec)
+                    if rings:
+                        outp.append(rings)
+                if outp:
+                    feats.append({'type': 'Feature',
+                                  'properties': {'nom': (f.get('properties') or {}).get('nom', '')},
+                                  'geometry': {'type': 'MultiPolygon', 'coordinates': outp}})
+            return {'type': 'FeatureCollection', 'features': feats}
+        data = _cached('departements', 30 * 86400, prod_fr)
+        return jsonify(data or {'type': 'FeatureCollection', 'features': []})
     if z is not None:
         dep = z.get('dep')
         if dep is None:
@@ -1973,6 +2147,23 @@ for _l in _LUTTE:
         _ens_store[_l]['ver'] = _w.get('ver')
         print(f"✓ Warm cache: ensemble lutte={_l} servi depuis le disque")
 del _w
+
+def _france_boot():
+    try:
+        saved = _warm_load('geo_names.json')
+        if saved:
+            _geo_names.update({tuple(map(float, k.split('|'))): v
+                               for k, v in saved.items()})
+        fr = fetch_france_fires()
+        _warm_save('geo_names.json',
+                   {f'{k[0]}|{k[1]}': v for k, v in _geo_names.items()})
+        _layer_cache['france_fires'] = (time.time(), fr)
+        _refresh_france_zone(fr)
+    except Exception as e:
+        print(f"france boot error: {e}")
+
+
+Thread(target=_france_boot, daemon=True).start()
 
 # Start background data fetch thread at import time so it also runs under
 # gunicorn (which never executes the __main__ block). update_data() does its

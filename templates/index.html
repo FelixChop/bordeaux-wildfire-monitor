@@ -208,6 +208,7 @@
 
   <div class="layers">
     <div class="lyr" id="burgerBtn" onclick="toggleMenu()" style="font-size:17px;padding:5px 13px">☰</div>
+    <div class="lyr" id="backBtn" style="display:none" onclick="location.href='/'">⬅ France</div>
   </div>
 
   <div class="menu" id="menu" style="display:none">
@@ -292,7 +293,9 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script>
-const ZONE=new URLSearchParams(location.search).get('zone')||'';
+const HOST_FR=location.hostname.includes('feux-de-foret');
+const ZONE=(new URLSearchParams(location.search).get('zone'))||(HOST_FR?'france':'');
+const RS=(ZONE==='france')?0.55:1;   // points plus petits à l'échelle nationale
 const zu=u=>ZONE?u+(u.includes('?')?'&':'?')+'zone='+encodeURIComponent(ZONE):u;
 const BDX=[44.837,-0.579];
 // Vue verrouillée : de l'océan (Lacanau océan) à Bordeaux rive droite.
@@ -337,7 +340,7 @@ async function boot(){
     const data=await getJSON(zu('/api/data'));           // wait until data is warm
     const [past,sim,wind,meteo,airF]=await Promise.all([
       getJSON(zu('/api/fire-history')),
-      getJSON(zu('/api/scenario?view=ref&lutte=med'),60),
+      getJSON(zu('/api/scenario?view=ref&lutte=med'),ZONE==='france'?4:60).catch(()=>({frames:[]})),
       getJSON(zu('/api/windfield')).catch(()=>null),
       fetch(zu('/api/meteosat')).then(r=>r.json()).catch(()=>null),
       fetch(zu('/api/air-field')).then(r=>r.ok?r.json():null).catch(()=>null)
@@ -354,6 +357,7 @@ async function boot(){
         document.title=data.zone.name+' — feu de forêt : carte & simulation';
         const mt=document.getElementById('menuTitle'); if(mt) mt.textContent='🔥 '+data.zone.name;
       }
+      if(ZONE&&ZONE!=='france'&&HOST_FR) $('backBtn').style.display='block';
     }
     if(sim.pyro_runs!=null&&sim.n_runs)
       setTimeout(()=>{const e=$('pyroProba');if(e)e.textContent=Math.round(sim.pyro_runs/sim.n_runs*100)+' %';},0);
@@ -369,9 +373,22 @@ async function boot(){
     renderStats();
     lockView();
     addVeg();             // vegetation base layer, always on
+    if(ZONE==='france') addClusterTargets();
     addAirOverlay();      // air quality layer, always on, follows the timeline
     goLive();             // start at the present
     $('loading').classList.add('hide');
+    // à l'échelle France, la prévision fusionnée peut arriver après coup
+    if(!(state.sim.frames||[]).length){
+      const t=setInterval(async()=>{
+        try{
+          const s2=await getJSON(zu('/api/scenario?view='+state.view+'&lutte='+state.lutte),1);
+          if((s2.frames||[]).length){
+            clearInterval(t); state.sim=s2;
+            const k=state.idx; buildTimeline(); render(Math.min(k,+$('slider').max));
+          }
+        }catch(e){}
+      }, 45000);
+    }
   }catch(e){ $('loading').innerHTML='<div>Erreur de chargement.<br><small>'+e+'</small></div>'; }
 }
 
@@ -487,6 +504,22 @@ function initDash(){
     b.onclick=()=>{state.lutte=b.dataset.l; setView(state.view);};
   });
 }
+let clusterLayer=null;
+async function addClusterTargets(){
+  try{
+    const d=await fetch('/api/fires').then(r=>r.json());
+    clusterLayer=L.layerGroup().addTo(map);
+    d.clusters.filter(c=>c.active).forEach(c=>{
+      // cible cliquable (zoom vers la fiche locale)
+      L.circleMarker([c.lat,c.lon],{radius:Math.min(14+Math.sqrt(c.frp_24h)*.4,30),
+        color:'rgba(255,152,0,.55)',weight:1.5,dashArray:'3,4',fill:true,
+        fillColor:'#ff9800',fillOpacity:.06})
+        .bindTooltip((c.name||'incendie')+' — toucher pour zoomer',{direction:'top'})
+        .on('click',()=>{location.href='/zone?zone='+encodeURIComponent(c.zone);})
+        .addTo(clusterLayer);
+    });
+  }catch(e){}
+}
 function toggleMenu(){
   const m=$('menu'), on=m.style.display==='none';
   m.style.display=on?'flex':'none';
@@ -573,7 +606,7 @@ function ageStyle(age,frp){
 }
 const SCAR={col:'#141414',op:.55,r:3};   // végétation brûlée
 function drawPoint(p,st,layer){
-  L.circleMarker([p.lat,p.lon],{radius:st.r,color:st.col,weight:.5,
+  L.circleMarker([p.lat,p.lon],{radius:Math.max(st.r*RS,1.6),color:st.col,weight:.5,
     fillColor:st.col,fillOpacity:st.op}).addTo(layer);
 }
 function renderPastFrame(f,i){
@@ -659,7 +692,8 @@ function renderSimFrame(f,i){
   const day=(vEmo||'')+' '+(j>0?`J+${j} · `:'prévision · ');
   const lut={low:' · 🚒⁻ lutte réduite',high:' · 🚒⁺ lutte renforcée'}[state.lutte]||'';
   const tmp=((f.temp_c!=null)?` · air ${f.temp_c}°C`:'')+lut;
-  const rng=(f.area_p10!=null)?` (${Math.round(f.area_p10/1000)}k–${Math.round(f.area_p90/1000)}k)`:'';
+  const nf=(state.sim&&state.sim.n_fires)?` · ${state.sim.n_fires} feux`:'';
+  const rng=((f.area_p10!=null)?` (${Math.round(f.area_p10/1000)}k–${Math.round(f.area_p90/1000)}k)`:'')+nf;
   $('tlInfo').textContent=`${day}${(f.area_ha||0).toLocaleString('fr-FR')} ha${rng} · vent ${f.wind_speed_ms} m/s · ${f.humidity_pct}%${tmp}`;
 }
 
