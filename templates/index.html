@@ -367,6 +367,15 @@ async function getJSON(url, tries=20){
   }
   throw new Error(url+' : données indisponibles');
 }
+// Filet de sécurité : un onglet restauré par iOS peut garder des fetch morts
+// (loader éternel). Si le boot n'aboutit pas, on recharge la page.
+let booted=false; const bootT0=Date.now();
+setTimeout(()=>{ if(!booted&&!sessionStorage.getItem('rbt')){
+  sessionStorage.setItem('rbt','1'); location.reload(); } }, 45000);
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='visible'&&!booted&&Date.now()-bootT0>20000)
+    location.reload();
+});
 async function boot(){
   try{
     const data=await getJSON(zu('/api/data'));           // wait until data is warm
@@ -409,6 +418,7 @@ async function boot(){
     if(ZONE==='france') addClusterTargets();
     addAirOverlay();      // air quality layer, always on, follows the timeline
     goLive();             // start at the present
+    booted=true; sessionStorage.removeItem('rbt');
     $('loading').classList.add('hide');
     // à l'échelle France, la prévision fusionnée peut arriver après coup
     if(!(state.sim.frames||[]).length){
