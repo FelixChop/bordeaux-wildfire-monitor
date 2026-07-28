@@ -324,14 +324,14 @@ function lockView(){
 // glisser doigt/souris, borné à la France. Aucun bouton.
 function setupFranceNav(){
   const base=map.getBoundsZoom(VIEW,false);
-  map.setMinZoom(base); map.setMaxZoom(base+2.8);   // 2^2.8 ≈ x7
+  map.setMinZoom(base); map.setMaxZoom(base+3.33);  // 2^3.33 ≈ x10
   map.setMaxBounds(VIEW.pad(0.05));
   map.dragging.enable();
   if(map.touchZoom)map.touchZoom.enable();
 }
 // UN double-clic : plein zoom sur le point (x~6) ; le suivant : France entière
 map.on('dblclick',e=>{ if(ZONE!=='france') return;
-  if(map.getZoom()<map.getMinZoom()+1) map.setView(e.latlng, map.getMinZoom()+2.5, {animate:true});
+  if(map.getZoom()<map.getMinZoom()+1) map.setView(e.latlng, map.getMinZoom()+3.33, {animate:true});
   else map.fitBounds(VIEW,{padding:[6,6]}); });
 window.addEventListener('resize', ()=>{ clearTimeout(window._rz); window._rz=setTimeout(lockView,200); });
 
