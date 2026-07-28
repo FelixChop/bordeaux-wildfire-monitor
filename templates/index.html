@@ -209,6 +209,7 @@
   <div class="layers">
     <div class="lyr" id="burgerBtn" onclick="toggleMenu()" style="font-size:17px;padding:5px 13px">☰</div>
     <div class="lyr" id="backBtn" style="display:none" onclick="location.href='/'">⬅ France</div>
+    <div class="lyr" id="zoomBtn" style="display:none" onclick="toggleZoom()">🔍 Zoom</div>
   </div>
 
   <div class="menu" id="menu" style="display:none">
@@ -311,7 +312,25 @@ fetch(zu('/api/communes')).then(r=>r.json()).then(gj=>{
   L.geoJSON(gj,{style:{color:'rgba(255,255,255,.38)',weight:1,fill:false,interactive:true},
     onEachFeature:(f,ly)=>ly.bindTooltip(f.properties.nom,{sticky:true,direction:'top'})}).addTo(map);
 }).catch(()=>{});
-function lockView(){ map.fitBounds(VIEW,{padding:[6,6]}); }
+let zoomed=false;
+function lockView(){ if(!zoomed) map.fitBounds(VIEW,{padding:[6,6]}); }
+function toggleZoom(){
+  zoomed=!zoomed;
+  const b=$('zoomBtn');
+  if(zoomed){
+    map.dragging.enable();
+    if(map.touchZoom)map.touchZoom.enable();
+    map.setMaxBounds(VIEW.pad(0.05));
+    map.setView(map.getCenter(), map.getBoundsZoom(VIEW)+1.6, {animate:true});
+    b.textContent='🗺 France entière'; b.style.background='rgba(230,110,40,.85)';
+  }else{
+    map.dragging.disable();
+    if(map.touchZoom)map.touchZoom.disable();
+    map.setMaxBounds(null);
+    map.fitBounds(VIEW,{padding:[6,6]});
+    b.textContent='🔍 Zoom'; b.style.background='';
+  }
+}
 window.addEventListener('resize', ()=>{ clearTimeout(window._rz); window._rz=setTimeout(lockView,200); });
 
 // layers
@@ -360,6 +379,7 @@ async function boot(){
         const mt=document.getElementById('menuTitle'); if(mt) mt.textContent='🔥 '+data.zone.name;
       }
       if(ZONE&&ZONE!=='france'&&HOST_FR) $('backBtn').style.display='block';
+      if(ZONE==='france') $('zoomBtn').style.display='block';
     }
     if(sim.pyro_runs!=null&&sim.n_runs)
       setTimeout(()=>{const e=$('pyroProba');if(e)e.textContent=Math.round(sim.pyro_runs/sim.n_runs*100)+' %';},0);
