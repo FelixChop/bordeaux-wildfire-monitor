@@ -212,7 +212,6 @@
   <div class="layers">
     <div class="lyr" id="burgerBtn" onclick="toggleMenu()" style="font-size:17px;padding:5px 13px">☰</div>
     <div class="lyr" id="backBtn" style="display:none" onclick="location.href='/'">⬅ France</div>
-    <div class="lyr" id="zoomBtn" style="display:none" onclick="toggleZoom()">🔍 Zoom</div>
   </div>
 
   <div class="menu" id="menu" style="display:none">
@@ -315,31 +314,22 @@ fetch(zu('/api/communes')).then(r=>r.json()).then(gj=>{
   L.geoJSON(gj,{style:{color:'rgba(255,255,255,.38)',weight:1,fill:false},
     interactive:false}).addTo(map);
 }).catch(()=>{});
-let zoomed=false;
-function lockView(){ if(!zoomed) map.fitBounds(VIEW,{padding:[6,6]}); }
-function enterZoom(center,dz){
-  const base=map.getBoundsZoom(VIEW);
-  const target=zoomed?Math.min(map.getZoom()+dz,base+4):base+1.6;
-  zoomed=true;
+function lockView(){
+  if(ZONE==='france'&&map.getZoom()>map.getMinZoom()+0.15) return; // en navigation
+  map.fitBounds(VIEW,{padding:[6,6]});
+  if(ZONE==='france') setupFranceNav();
+}
+// Navigation France : pincement 2 doigts + double-clic (jusqu'à ~x7),
+// glisser doigt/souris, borné à la France. Aucun bouton.
+function setupFranceNav(){
+  const base=map.getBoundsZoom(VIEW,false);
+  map.setMinZoom(base); map.setMaxZoom(base+2.8);   // 2^2.8 ≈ x7
+  map.setMaxBounds(VIEW.pad(0.05));
   map.dragging.enable();
   if(map.touchZoom)map.touchZoom.enable();
-  map.setMaxBounds(VIEW.pad(0.05));
-  map.setView(center||map.getCenter(), target, {animate:true});
-  const b=$('zoomBtn');
-  b.textContent='🗺 France entière'; b.style.background='rgba(230,110,40,.85)';
 }
-function exitZoom(){
-  zoomed=false;
-  map.dragging.disable();
-  if(map.touchZoom)map.touchZoom.disable();
-  map.setMaxBounds(null);
-  map.fitBounds(VIEW,{padding:[6,6]});
-  const b=$('zoomBtn');
-  b.textContent='🔍 Zoom'; b.style.background='';
-}
-function toggleZoom(){ zoomed?exitZoom():enterZoom(); }
-// double-clic (ou double-tap) : zoom progressif centré sur le point
-map.on('dblclick',e=>{ if(ZONE==='france') enterZoom(e.latlng,1); });
+map.on('dblclick',e=>{ if(ZONE==='france')
+  map.setView(e.latlng, Math.min(map.getZoom()+1.4, map.getMaxZoom()), {animate:true}); });
 window.addEventListener('resize', ()=>{ clearTimeout(window._rz); window._rz=setTimeout(lockView,200); });
 
 // layers
@@ -399,7 +389,6 @@ async function boot(){
         const mt=document.getElementById('menuTitle'); if(mt) mt.textContent='🔥 '+data.zone.name;
       }
       if(ZONE&&ZONE!=='france'&&HOST_FR) $('backBtn').style.display='block';
-      if(ZONE==='france') $('zoomBtn').style.display='block';
     }
     if(sim.pyro_runs!=null&&sim.n_runs)
       setTimeout(()=>{const e=$('pyroProba');if(e)e.textContent=Math.round(sim.pyro_runs/sim.n_runs*100)+' %';},0);

@@ -643,7 +643,6 @@ def _zone_refresh(z):
         sats = sorted({h.get('sat') for h in hotspots})
         clat, clon = z['lat'], z['lon']
         z['wind_field'] = fetch_wind_field_bbox(bbox)
-        z['veg'] = fetch_vegetation_bbox(bbox)
         wind_series = []
         wf = z['wind_field']
         if wf:
@@ -673,9 +672,9 @@ def _zone_refresh(z):
         z['air_field'] = fetch_air_field_bbox(bbox)
         z['last_update'] = datetime.utcnow()
         z['ready'] = True
-        # NDVI en dernier : GIBS peut prendre >1 min, la zone est deja servie
+        # NDVI en dernier : GIBS peut prendre >1 min, la fiche est deja servie
         if z.get('veg') is None:
-            z['veg'] = fetch_vegetation_bbox(FR_SIM_BBOX)
+            z['veg'] = fetch_vegetation_bbox(bbox)
         print(f"✓ Zone {z['id']} ({z.get('name','')}) prête : {len(hotspots)} foyers")
     except Exception as e:
         print(f"zone refresh {z.get('id')} error: {e}")
