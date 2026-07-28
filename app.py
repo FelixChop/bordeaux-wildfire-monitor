@@ -561,11 +561,20 @@ def fetch_air_field_bbox(bbox):
         for lo in lons:
             laq.append(round(float(la), 3))
             loq.append(round(float(lo), 3))
-    r = requests.get('https://air-quality-api.open-meteo.com/v1/air-quality', params={
-        'latitude': ','.join(map(str, laq)), 'longitude': ','.join(map(str, loq)),
-        'hourly': 'european_aqi,pm2_5', 'past_days': 5, 'forecast_days': 7,
-        'timezone': 'UTC'}, timeout=30)
-    if r.status_code != 200:
+    r = None
+    for att in range(3):
+        try:
+            r = requests.get('https://air-quality-api.open-meteo.com/v1/air-quality', params={
+                'latitude': ','.join(map(str, laq)), 'longitude': ','.join(map(str, loq)),
+                'hourly': 'european_aqi,pm2_5', 'past_days': 5, 'forecast_days': 7,
+                'timezone': 'UTC'}, timeout=40)
+            if r.status_code == 200:
+                break
+        except requests.RequestException as e:
+            print(f"air bbox fetch essai {att + 1}: {e}")
+        time.sleep(4)
+    if r is None or r.status_code != 200:
+        print(f"air bbox KO ({'HTTP ' + str(r.status_code) if r is not None else 'reseau'})")
         return None
     res = r.json()
     if isinstance(res, dict):
@@ -642,7 +651,7 @@ def _zone_refresh(z):
         last_ts = max((h['timestamp'] for h in hotspots), default=None)
         sats = sorted({h.get('sat') for h in hotspots})
         clat, clon = z['lat'], z['lon']
-        z['wind_field'] = fetch_wind_field_bbox(bbox)
+        z['wind_field'] = fetch_wind_field_bbox(bbox) or z.get('wind_field')
         wind_series = []
         wf = z['wind_field']
         if wf:
@@ -669,7 +678,7 @@ def _zone_refresh(z):
             'air': None,
             'pyro_watch': fetch_pyro_watch(clat, clon, hotspots),
         }
-        z['air_field'] = fetch_air_field_bbox(bbox)
+        z['air_field'] = fetch_air_field_bbox(bbox) or z.get('air_field')
         z['last_update'] = datetime.utcnow()
         z['ready'] = True
         # NDVI en dernier : GIBS peut prendre >1 min, la fiche est deja servie
@@ -725,8 +734,13 @@ def _refresh_france_zone(fr):
         z['sim_bbox'] = FR_SIM_BBOX
         z['view'] = FRANCE_VIEW
         z['name'] = 'France'
-        z['wind_field'] = fetch_wind_field_bbox(FR_SIM_BBOX)
-        z['air_field'] = fetch_air_field_bbox(FR_SIM_BBOX)
+        z['wind_field'] = fetch_wind_field_bbox(FR_SIM_BBOX) or z.get('wind_field')
+        af_new = fetch_air_field_bbox(FR_SIM_BBOX)
+        if af_new is not None:
+            z['air_field'] = af_new
+            _warm_save('france_air.json', af_new)
+        elif z.get('air_field') is None:
+            z['air_field'] = _warm_load('france_air.json')
         top = clusters[0] if clusters else None
         z['latest'] = {
             'timestamp': datetime.utcnow().isoformat(),
@@ -1922,11 +1936,20 @@ def fetch_air_field():
         for lo in lons:
             laq.append(round(float(la), 3))
             loq.append(round(float(lo), 3))
-    r = requests.get('https://air-quality-api.open-meteo.com/v1/air-quality', params={
-        'latitude': ','.join(map(str, laq)), 'longitude': ','.join(map(str, loq)),
-        'hourly': 'european_aqi,pm2_5', 'past_days': 5, 'forecast_days': 7,
-        'timezone': 'UTC'}, timeout=30)
-    if r.status_code != 200:
+    r = None
+    for att in range(3):
+        try:
+            r = requests.get('https://air-quality-api.open-meteo.com/v1/air-quality', params={
+                'latitude': ','.join(map(str, laq)), 'longitude': ','.join(map(str, loq)),
+                'hourly': 'european_aqi,pm2_5', 'past_days': 5, 'forecast_days': 7,
+                'timezone': 'UTC'}, timeout=40)
+            if r.status_code == 200:
+                break
+        except requests.RequestException as e:
+            print(f"air bbox fetch essai {att + 1}: {e}")
+        time.sleep(4)
+    if r is None or r.status_code != 200:
+        print(f"air bbox KO ({'HTTP ' + str(r.status_code) if r is not None else 'reseau'})")
         return None
     res = r.json()
     if isinstance(res, dict):

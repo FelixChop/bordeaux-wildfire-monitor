@@ -621,8 +621,19 @@ function goLive(){ if(state.playing) stop(); render(state.nowIdx); }
 function drawWindAt(ts){
   const w=state.wind; if(!w||!w.speed||!ts) return;
   const k=state.windIdx[ts.slice(0,13)]; if(k==null) return;
+  // fleches et temperatures UNIQUEMENT aux abords des incendies actifs
+  let fires=[];
+  if(ZONE==='france'){
+    fires=((state.data&&state.data.clusters)||[]).filter(c=>c.active).map(c=>[c.lat,c.lon]);
+  }else{
+    const c=state.data&&state.data.fire_perimeter&&state.data.fire_perimeter.centroid;
+    if(c) fires=[[c.lat,c.lon]];
+  }
+  const R=ZONE==='france'?0.75:0.45;   // degres (~80 km / ~50 km)
+  const nearFire=(la,lo)=>fires.some(f=>Math.abs(f[0]-la)<R&&Math.abs(f[1]-lo)<R*1.4);
   for(let a=0;a<w.grid_lats.length;a++){
     for(let b=0;b<w.grid_lons.length;b++){
+      if(fires.length&&!nearFire(w.grid_lats[a],w.grid_lons[b])) continue;
       const s=w.speed[k][a][b], dir=w.dir[k][a][b];
       const t=(w.temp&&w.temp[k])?Math.round(w.temp[k][a][b]):null;
       const rot=(dir+90); // arrow ➤ points east by default; wind blows toward dir+180
