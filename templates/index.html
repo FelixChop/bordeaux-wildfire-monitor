@@ -314,10 +314,11 @@ fetch(zu('/api/communes')).then(r=>r.json()).then(gj=>{
   L.geoJSON(gj,{style:{color:'rgba(255,255,255,.38)',weight:1,fill:false},
     interactive:false}).addTo(map);
 }).catch(()=>{});
+let navReady=false;
 function lockView(){
-  if(ZONE==='france'&&map.getZoom()>map.getMinZoom()+0.15) return; // en navigation
+  if(ZONE==='france'&&navReady&&map.getZoom()>map.getMinZoom()+0.15) return; // en navigation
   map.fitBounds(VIEW,{padding:[6,6]});
-  if(ZONE==='france') setupFranceNav();
+  if(ZONE==='france'&&!navReady){ setupFranceNav(); navReady=true; }
 }
 // Navigation France : pincement 2 doigts + double-clic (jusqu'à ~x7),
 // glisser doigt/souris, borné à la France. Aucun bouton.
