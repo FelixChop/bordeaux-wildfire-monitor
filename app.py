@@ -2317,6 +2317,18 @@ def _france_ens_loop():
                                    {'ver': ent_fr['ver'],
                                     'views': ent_fr['views'],
                                     'views_hr': ent_fr.get('views_hr')})
+                # zones ouvertes par les utilisateurs (fiches) : leur ensemble
+                # med est calcule ici, en fond — jamais dans une requete
+                top_ids = {c['zone'] for c in tops}
+                extra = [zid for zid, zz in list(ZONES.items())
+                         if zid not in ('france', 'gironde')
+                         and zid not in top_ids and zz.get('ready')
+                         and not (zz.get('ens') or {}).get('med')][:6]
+                for zid in extra:
+                    try:
+                        compute_zone_ensemble(zid, 'med', wait=True)
+                    except Exception as e4:
+                        print(f"zone visitee {zid} err: {e4}")
         except Exception as e:
             print(f"france ens loop err: {e}")
         time.sleep(300)

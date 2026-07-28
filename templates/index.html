@@ -381,7 +381,7 @@ async function boot(){
     const data=await getJSON(zu('/api/data'));           // wait until data is warm
     const [past,sim,wind,meteo,airF]=await Promise.all([
       getJSON(zu('/api/fire-history')),
-      getJSON(zu('/api/scenario?view=ref&lutte=med'),ZONE==='france'?4:60).catch(()=>({frames:[]})),
+      getJSON(zu('/api/scenario?view=ref&lutte=med'),4).catch(()=>({frames:[]})),
       getJSON(zu('/api/windfield')).catch(()=>null),
       fetch(zu('/api/meteosat')).then(r=>r.json()).catch(()=>null),
       fetch(zu('/api/air-field')).then(r=>r.ok?r.json():null).catch(()=>null)
