@@ -329,8 +329,10 @@ function setupFranceNav(){
   map.dragging.enable();
   if(map.touchZoom)map.touchZoom.enable();
 }
-map.on('dblclick',e=>{ if(ZONE==='france')
-  map.setView(e.latlng, Math.min(map.getZoom()+1.4, map.getMaxZoom()), {animate:true}); });
+// UN double-clic : plein zoom sur le point (x~6) ; le suivant : France entière
+map.on('dblclick',e=>{ if(ZONE!=='france') return;
+  if(map.getZoom()<map.getMinZoom()+1) map.setView(e.latlng, map.getMinZoom()+2.5, {animate:true});
+  else map.fitBounds(VIEW,{padding:[6,6]}); });
 window.addEventListener('resize', ()=>{ clearTimeout(window._rz); window._rz=setTimeout(lockView,200); });
 
 // layers
