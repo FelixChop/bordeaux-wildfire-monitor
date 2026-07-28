@@ -330,6 +330,8 @@ function setupFranceNav(){
   if(map.touchZoom)map.touchZoom.enable();
 }
 // UN double-clic : plein zoom sur le point (x~6) ; le suivant : France entière
+map.on('zoomend',()=>{ if(ZONE==='france'&&state.sim&&state.idx!=null){
+  try{ render(state.idx); }catch(e){} } });
 map.on('dblclick',e=>{ if(ZONE!=='france') return;
   if(map.getZoom()<map.getMinZoom()+1) map.setView(e.latlng, map.getMinZoom()+3.33, {animate:true});
   else map.fitBounds(VIEW,{padding:[6,6]}); });
@@ -646,8 +648,8 @@ function ageStyle(age,frp){
   return       {col:'#7f0000',op:.32,r:Math.max(base-2,2)}; // braise mourante
 }
 const SCAR={col:'#141414',op:.55,r:3};   // végétation brûlée
-function drawPoint(p,st,layer){
-  L.circleMarker([p.lat,p.lon],{radius:Math.max(st.r*RS,1.6),color:st.col,weight:.5,
+function drawPoint(p,st,layer,rpx){
+  L.circleMarker([p.lat,p.lon],{radius:rpx||Math.max(st.r*RS,1.6),color:st.col,weight:.5,
     fillColor:st.col,fillOpacity:st.op}).addTo(layer);
 }
 function renderPastFrame(f,i){
@@ -706,12 +708,23 @@ function renderSimFrame(f,i){
   });
   // Simulated ignitions: same colours as real fire, cyan outline = simulated.
   const front=[];
+  // cellules du raster national (hors feux 500 m) : dessinees a l'echelle
+  // de la cellule -> les voisines se touchent, le front est continu
+  let cellPx=0, hrBoxes=[];
+  if(ZONE==='france'&&state.sim&&state.sim.cell_m){
+    const cd=state.sim.cell_m/111320;
+    cellPx=Math.abs(map.latLngToLayerPoint([46+cd,2]).y-map.latLngToLayerPoint([46,2]).y);
+    hrBoxes=state.sim.hires_boxes||[];
+  }
+  const inHR=p=>hrBoxes.some(b=>b[1]<=p.lat&&p.lat<=b[3]&&b[0]<=p.lon&&p.lon<=b[2]);
   (state.simPts||[]).forEach(p=>{
     const age=H-p.h;
     if(age<0) return;
     if(age<6) front.push(p);
     const active=age<state.winH;
-    drawPoint(p, active?ageStyle(age,20):SCAR, simLayer);
+    const coarse=cellPx>1&&!inHR(p);
+    drawPoint(p, active?ageStyle(age,20):SCAR, simLayer,
+              coarse?Math.max(cellPx*0.62,2):null);
   });
   // PyroCumulonimbus : orages de feu au-dessus du front actif
   if(state.scen.pyro!=='low'&&front.length){

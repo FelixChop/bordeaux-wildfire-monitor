@@ -2273,6 +2273,7 @@ def _merge_hires_views(nat_views, hires):
             frames.append(f2)
         d['frames'] = frames
         d['hires_n'] = len(zvs)
+        d['hires_boxes'] = [list(bb) for bb, _ in zvs]
         out[vk] = d
     return out
 
@@ -2284,7 +2285,7 @@ def _france_ens_loop():
     while True:
         try:
             if ZONES.get('france', {}).get('ready'):
-                tops = _france_top_clusters(int(os.getenv('FR_HIRES', '4')))
+                tops = _france_top_clusters(int(os.getenv('FR_HIRES', '6')))
                 for c in tops:
                     _get_zone(c['zone'])       # lance les refresh de zone
                 for lv in ('med', 'low', 'high'):

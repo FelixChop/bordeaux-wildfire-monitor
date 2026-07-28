@@ -433,10 +433,11 @@ def simulate_monte_carlo(hotspots, wind_records, wind_field=None, veg_fuel=None,
         # newly "mean-burned" cells since previous emitted frame
         newly = p50 & ~prev_p50 & ~seed
         nr, nc = np.where(newly)
+        dense = dom['cell_lat_m'] < 1000
         new_pts = [[round(float(dom['lat_axis'][r]), 4),
                     round(float(dom['lon_axis'][c]), 4), int(H)]
                    for r, c in zip(nr.tolist(), nc.tolist())
-                   if (r + c) % 2 == 0]          # 1-in-2 subsample
+                   if not dense or (r + c) % 2 == 0]   # 1-in-2 si grille fine
         prev_p50 = p50
 
         mm = meta[H] if meta and H < len(meta) else {}
@@ -705,9 +706,11 @@ def derive_view(store, view='ref', emit_every=3):
         area_m = float((seed | ((ig_m >= 0) & (ig_m <= H))).sum() * dom['cell_area_ha'])
         newly = (ig_m > prev_h) & (ig_m <= H) & ~seed
         nr, nc = np.where(newly)
+        dense = dom['cell_lat_m'] < 1000
         new_pts = [[round(float(dom['lat_axis'][r]), 4),
                     round(float(dom['lon_axis'][c]), 4), int(ig_m[r, c])]
-                   for r, c in zip(nr.tolist(), nc.tolist()) if (r + c) % 2 == 0]
+                   for r, c in zip(nr.tolist(), nc.tolist())
+                   if not dense or (r + c) % 2 == 0]
         prev_h = H
         mm = meta[H] if meta and H < len(meta) else {}
         frames.append({
@@ -721,6 +724,7 @@ def derive_view(store, view='ref', emit_every=3):
             'smoke': smoke.get(H),
         })
     return {'n_frames': len(frames), 'n_seeds': dom['n_seeds'],
+            'cell_m': int(round(dom['cell_lat_m'])),
             'n_runs': n, 'view': view, 'member': int(member),
             'member_pyro': bool(store['pyro'][member]),
             'pyro_runs': int(store['pyro'].sum()),
