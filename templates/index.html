@@ -3,22 +3,22 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-  <title>Incendie Bordeaux — carte temps réel du feu de forêt en Gironde et simulation 7 jours</title>
-  <meta name="description" content="Carte en direct de l'incendie près de Bordeaux : foyers détectés par satellite (NASA FIRMS, Meteosat ~10 min), qualité de l'air, vent, et simulation Monte Carlo de la propagation à 7 jours (vent, sécheresse, végétation, pompiers, pyrocumulonimbus).">
-  <link rel="canonical" href="https://incendiebordeaux.fr/">
-  <meta property="og:title" content="Incendie Bordeaux — carte temps réel & simulation">
-  <meta property="og:description" content="Foyers satellites en direct, qualité de l'air, et prévision de propagation à 7 jours par ensemble Monte Carlo.">
+  <title>{{ seo.title }}</title>
+  <meta name="description" content="{{ seo.desc }}">
+  <link rel="canonical" href="{{ seo.url }}">
+  <meta property="og:title" content="{{ seo.og_title }}">
+  <meta property="og:description" content="{{ seo.og_desc }}">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://incendiebordeaux.fr/">
+  <meta property="og:url" content="{{ seo.url }}">
   <meta property="og:locale" content="fr_FR">
   <meta name="twitter:card" content="summary">
   <meta name="theme-color" content="#12100f">
   <script type="application/ld+json">
   {"@context":"https://schema.org","@type":"WebApplication",
-   "name":"Incendie Bordeaux — carte temps réel et simulation",
-   "url":"https://incendiebordeaux.fr/",
+   "name":{{ seo.og_title|tojson }},
+   "url":{{ seo.url|tojson }},
    "applicationCategory":"Map",
-   "description":"Carte en direct du feu de forêt près de Bordeaux (Gironde) : foyers satellites, qualité de l'air, vent, et simulation Monte Carlo de la propagation de l'incendie à 7 jours.",
+   "description":{{ seo.desc|tojson }},
    "inLanguage":"fr","isAccessibleForFree":true,
    "creator":{"@type":"Person","name":"Félix Revert"}}
   </script>
@@ -204,7 +204,7 @@
 <body>
   <div class="loading" id="loading"><div><div class="spin"></div>Chargement des données temps réel…</div></div>
 
-  <h1 class="sr-only">Feu à Bordeaux : carte en temps réel et simulation de l'incendie de forêt en Gironde</h1>
+  <h1 class="sr-only">{{ seo.h1 }}</h1>
   <div id="map"></div>
   <div class="simveil"></div>
 
@@ -358,9 +358,11 @@ const ago=iso=>{ if(!iso) return ''; const m=Math.round((Date.now()-new Date(iso
 
 async function getJSON(url, tries=20){
   for(let i=0;i<tries;i++){
-    const r=await fetch(url);
+    let r;
+    try{ r=await fetch(url); }
+    catch(e){ await new Promise(s=>setTimeout(s,3000)); continue; }  // serveur qui redémarre
     if(r.ok) return r.json();
-    if(r.status===503){ await new Promise(s=>setTimeout(s,3000)); continue; } // data warming up
+    if(r.status===503||r.status>=500){ await new Promise(s=>setTimeout(s,3000)); continue; }
     throw new Error(url+' → '+r.status);
   }
   throw new Error(url+' : données indisponibles');

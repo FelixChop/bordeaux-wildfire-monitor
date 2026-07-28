@@ -202,7 +202,8 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
                 act_ha = float(sizes.max()) * dom['cell_area_ha']
             else:
                 act_ha = 0.0
-            p_day = min(0.35, 0.12 * (act_ha / 20000.0))
+            p_day = min(0.35, 0.12 * (act_ha / 20000.0)
+                        * float(sc.get('pyro_mult', 1.0)))
             if act_ha > 0 and rng.random() < p_day:
                 pyro_until = h + 10
                 pyro_any = True

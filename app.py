@@ -883,7 +883,8 @@ def compute_zone_ensemble(zid, lutte='med', wait=False):
             veg_bbox=z['sim_bbox'], max_hours=168,
             n_runs=int(os.getenv('FR_RUNS', '8')) if is_fr else int(os.getenv('ZONE_RUNS', '12')),
             scenario={'supp_level': _LUTTE.get(lutte, 1.0),
-                      'cap_mult': float(np.clip(n_fires, 1, 15))},
+                      'cap_mult': float(np.clip(n_fires, 1, 15) ** 1.5),
+                      'pyro_mult': 0.5 if is_fr else 1.0},
             smk_bbox=(lat0, lon0, lat1, lon1))
         if store is None:
             z['ens'][lutte] = {'ver': ver, 'views': {}}
@@ -1101,8 +1102,36 @@ def generate_map_html():
 
     return m._repr_html_()
 
+_SEO_GIRONDE = {
+    'title': "Incendie Bordeaux — carte temps réel du feu de forêt en Gironde et simulation 7 jours",
+    'desc': ("Carte en direct de l'incendie près de Bordeaux : foyers détectés par satellite "
+             "(NASA FIRMS, Meteosat ~10 min), qualité de l'air, vent, et simulation Monte Carlo "
+             "de la propagation à 7 jours (vent, sécheresse, végétation, pompiers, pyrocumulonimbus)."),
+    'url': 'https://incendiebordeaux.fr/',
+    'og_title': "Incendie Bordeaux — carte temps réel & simulation",
+    'og_desc': ("Foyers satellites en direct, qualité de l'air, et prévision de propagation "
+                "à 7 jours par ensemble Monte Carlo."),
+    'h1': "Feu à Bordeaux : carte en temps réel et simulation de l'incendie de forêt en Gironde",
+}
+_SEO_FRANCE = {
+    'title': "Feux de forêt en France — carte temps réel des incendies et simulation 7 jours",
+    'desc': ("Tous les feux de forêt actifs en France sur une carte en temps réel : foyers détectés "
+             "par satellite (NASA FIRMS, Meteosat ~10 min), qualité de l'air, vent, et simulation "
+             "Monte Carlo de la propagation de chaque incendie à 7 jours (météo, sécheresse, "
+             "végétation, pompiers, pyrocumulonimbus)."),
+    'url': 'https://feux-de-foret.fr/',
+    'og_title': "Feux de forêt en France — carte temps réel & simulation des incendies",
+    'og_desc': ("Incendies actifs détectés par satellite dans toute la France, qualité de l'air "
+                "et prévision de propagation à 7 jours par ensemble Monte Carlo."),
+    'h1': ("Feux de forêt en France : carte en temps réel des incendies actifs, "
+           "qualité de l'air et simulation de propagation"),
+}
+
+
 def _html(t):
-    resp = Response(render_template(t), mimetype='text/html')
+    is_fr = 'feux-de-foret' in (request.host or '')
+    resp = Response(render_template(t, seo=_SEO_FRANCE if is_fr else _SEO_GIRONDE),
+                    mimetype='text/html')
     resp.headers['Cache-Control'] = 'no-cache'
     return resp
 
@@ -2029,16 +2058,18 @@ def api_air_grid():
 
 @app.route('/robots.txt')
 def robots():
-    return Response("User-agent: *\nAllow: /\nSitemap: https://incendiebordeaux.fr/sitemap.xml\n",
+    host = 'feux-de-foret.fr' if 'feux-de-foret' in (request.host or '') else 'incendiebordeaux.fr'
+    return Response(f"User-agent: *\nAllow: /\nSitemap: https://{host}/sitemap.xml\n",
                     mimetype='text/plain')
 
 
 @app.route('/sitemap.xml')
 def sitemap():
+    host = 'feux-de-foret.fr' if 'feux-de-foret' in (request.host or '') else 'incendiebordeaux.fr'
     xml = ('<?xml version="1.0" encoding="UTF-8"?>'
            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
-           '<url><loc>https://incendiebordeaux.fr/</loc><changefreq>hourly</changefreq></url>'
-           '<url><loc>https://incendiebordeaux.fr/methodologie</loc><changefreq>monthly</changefreq></url>'
+           f'<url><loc>https://{host}/</loc><changefreq>hourly</changefreq></url>'
+           f'<url><loc>https://{host}/methodologie</loc><changefreq>monthly</changefreq></url>'
            '</urlset>')
     return Response(xml, mimetype='application/xml')
 
