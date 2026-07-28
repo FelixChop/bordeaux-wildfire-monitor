@@ -736,7 +736,7 @@ function stop(){ state.playing=false; $('play').textContent='▶'; if(state.time
 let vegOverlay=null;
 function addVeg(){
   const b=state.vegBounds||(ZONE==='france'?[[41.2,-5.2],[51.3,9.8]]:[[44.2,-1.8],[45.6,-0.2]]);
-  vegOverlay=overlayWithRetry(zu('/api/vegetation.png'),b,
+  vegOverlay=overlayWithRetry(zu('/api/vegetation.png')+(ZONE?'&':'?')+'v=2',b,
     {opacity:.6,interactive:false}).addTo(map);
 }
 

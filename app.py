@@ -254,9 +254,11 @@ def fetch_vegetation():
             url = ("https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
                    "?SERVICE=WMS&REQUEST=GetMap&VERSION=1.3.0"
                    "&LAYERS=MODIS_Terra_NDVI_8Day&STYLES=&CRS=EPSG:4326"
-                   f"&BBOX={lat0},{lon0},{lat1},{lon1}&WIDTH=420&HEIGHT=370"
+                   f"&BBOX={lat0},{lon0},{lat1},{lon1}"
+                   f"&WIDTH={min(1400, max(420, int((lon1 - lon0) * 90)))}"
+                   f"&HEIGHT={min(1400, max(370, int((lat1 - lat0) * 90)))}"
                    f"&FORMAT=image/png&TIME={d2}")
-            r = requests.get(url, timeout=25)
+            r = requests.get(url, timeout=40)
             if r.status_code == 200:
                 break
         if r is None or r.status_code != 200:
@@ -521,9 +523,11 @@ def fetch_vegetation_bbox(bbox):
             url = ("https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
                    "?SERVICE=WMS&REQUEST=GetMap&VERSION=1.3.0"
                    "&LAYERS=MODIS_Terra_NDVI_8Day&STYLES=&CRS=EPSG:4326"
-                   f"&BBOX={lat0},{lon0},{lat1},{lon1}&WIDTH=420&HEIGHT=370"
+                   f"&BBOX={lat0},{lon0},{lat1},{lon1}"
+                   f"&WIDTH={min(1400, max(420, int((lon1 - lon0) * 90)))}"
+                   f"&HEIGHT={min(1400, max(370, int((lat1 - lat0) * 90)))}"
                    f"&FORMAT=image/png&TIME={d2}")
-            r = requests.get(url, timeout=25)
+            r = requests.get(url, timeout=40)
             if r.status_code == 200:
                 break
         if r is None or r.status_code != 200:
@@ -1424,7 +1428,7 @@ def api_vegetation_png():
     mpimg.imsave(buf, rgba, format='png')
     buf.seek(0)
     return Response(buf.read(), mimetype='image/png',
-                    headers={'Cache-Control': 'public, max-age=3600'})
+                    headers={'Cache-Control': 'public, max-age=300'})
 
 
 @app.route('/api/windfield')
