@@ -299,7 +299,9 @@ const RS=(ZONE==='france')?0.55:1;   // points plus petits à l'échelle nationa
 const zu=u=>ZONE?u+(u.includes('?')?'&':'?')+'zone='+encodeURIComponent(ZONE):u;
 const BDX=[44.837,-0.579];
 // Vue verrouillée : de l'océan (Lacanau océan) à Bordeaux rive droite.
-let VIEW=L.latLngBounds([[44.33,-1.35],[45.06,-0.45]]);  // défaut Gironde ; remplacé par la zone
+let VIEW=(ZONE==='france')
+  ? L.latLngBounds([[41.2,-5.2],[51.3,9.8]])               // France dès l'init
+  : L.latLngBounds([[44.33,-1.35],[45.06,-0.45]]);         // défaut Gironde
 const map=L.map('map',{zoomControl:false,attributionControl:false,preferCanvas:true,
   dragging:false,scrollWheelZoom:false,doubleClickZoom:false,touchZoom:false,
   boxZoom:false,keyboard:false,zoomSnap:0.1}).fitBounds(VIEW);
@@ -713,7 +715,7 @@ function stop(){ state.playing=false; $('play').textContent='▶'; if(state.time
 // vegetation base layer: ALWAYS on (no toggle) — burned scars darken it
 let vegOverlay=null;
 function addVeg(){
-  const b=state.vegBounds||[[44.2,-1.8],[45.6,-0.2]];
+  const b=state.vegBounds||(ZONE==='france'?[[41.2,-5.2],[51.3,9.8]]:[[44.2,-1.8],[45.6,-0.2]]);
   vegOverlay=overlayWithRetry(zu('/api/vegetation.png'),b,
     {opacity:.6,interactive:false}).addTo(map);
 }

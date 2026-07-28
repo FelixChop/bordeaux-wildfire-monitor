@@ -58,7 +58,8 @@ def _shift(mask, di, dj):
     return out
 
 
-def _prepare_domain(hotspots, veg_fuel, veg_bbox, cell_deg=0.005):
+def _prepare_domain(hotspots, veg_fuel, veg_bbox, cell_deg=0.005,
+                    max_cells=360_000):
     seeds = [(h['lat'], h['lon']) for h in hotspots if 'lat' in h and 'lon' in h]
     if not seeds:
         return None
@@ -67,6 +68,11 @@ def _prepare_domain(hotspots, veg_fuel, veg_bbox, cell_deg=0.005):
     margin = 0.60
     lat_min, lat_max = lats.min() - margin, lats.max() + margin
     lon_min, lon_max = lons.min() - margin, lons.max() + margin
+    # résolution ADAPTATIVE : un domaine national grossit ses cellules pour
+    # rester calculable (France entière -> ~2.4 km/cellule, ~350 k cellules)
+    n_est = ((lat_max - lat_min) / cell_deg) * ((lon_max - lon_min) / cell_deg)
+    if n_est > max_cells:
+        cell_deg = float(np.sqrt((lat_max - lat_min) * (lon_max - lon_min) / max_cells))
     lat_axis = np.arange(lat_min, lat_max, cell_deg)
     lon_axis = np.arange(lon_min, lon_max, cell_deg)
     nrows, ncols = len(lat_axis), len(lon_axis)
@@ -147,11 +153,23 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
                 if wind_field.get('soil') is not None else None)
         glats = np.array(wind_field['grid_lats'])
         glons = np.array(wind_field['grid_lons'])
+        # Bilinéaire vectorisée à poids précalculés : ~100x plus rapide que
+        # scipy sur les gros domaines (France ~350 k cellules x 168 h x 5 champs)
+        LATg = dom['pts'][:, 0].reshape(nrows, ncols)
+        LONg = dom['pts'][:, 1].reshape(nrows, ncols)
+        _iy = np.clip(np.searchsorted(glats, LATg) - 1, 0, len(glats) - 2)
+        _ix = np.clip(np.searchsorted(glons, LONg) - 1, 0, len(glons) - 2)
+        _wy = np.clip((LATg - glats[_iy]) / (glats[_iy + 1] - glats[_iy]), 0, 1)
+        _wx = np.clip((LONg - glons[_ix]) / (glons[_ix + 1] - glons[_ix]), 0, 1)
+        _w00 = (1 - _wy) * (1 - _wx)
+        _w10 = _wy * (1 - _wx)
+        _w01 = (1 - _wy) * _wx
+        _w11 = _wy * _wx
 
         def interp(f2d):
-            f = RegularGridInterpolator((glats, glons), f2d,
-                                        bounds_error=False, fill_value=None)
-            return f(dom['pts']).reshape(nrows, ncols)
+            f = np.asarray(f2d)
+            return (f[_iy, _ix] * _w00 + f[_iy + 1, _ix] * _w10
+                    + f[_iy, _ix + 1] * _w01 + f[_iy + 1, _ix + 1] * _w11)
     else:
         recs = (wind_records or [])[:max_hours]
         times = [r.get('timestamp') for r in recs]
@@ -170,20 +188,35 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
 
     pyro_until = -1
     pyro_any = False
+    pyro_mask = np.zeros((nrows, ncols), dtype=bool)
     for h in range(n_hours):
         # PyroCb ÉMERGENT : chaque après-midi, la probabilité qu'un orage de
         # feu se déclenche dépend de l'INTENSITÉ du feu simulé (surface active)
         # et de la chaleur — un feu mourant n'en produit plus.
         if rng is not None and h % 24 == 12:
-            act_ha = float((burned & ~contained).sum() * dom['cell_area_ha'])
+            act = burned & ~contained
+            if act.any():
+                from scipy.ndimage import label as _label
+                lab, nlab = _label(act)
+                sizes = np.bincount(lab.ravel())[1:]
+                act_ha = float(sizes.max()) * dom['cell_area_ha']
+            else:
+                act_ha = 0.0
             p_day = min(0.35, 0.12 * (act_ha / 20000.0))
-            if rng.random() < p_day:
+            if act_ha > 0 and rng.random() < p_day:
                 pyro_until = h + 10
                 pyro_any = True
+                # l'orage de feu est LOCAL : il se forme au-dessus du plus
+                # grand incendie actif, pas sur tout le domaine
+                big = (lab == (int(np.argmax(sizes)) + 1))
+                br, bc = np.where(big)
+                _rg, _cg = np.meshgrid(np.arange(nrows), np.arange(ncols),
+                                       indexing='ij')
+                _rad = 30_000.0 / dom['cell_lat_m']        # ~30 km
+                pyro_mask = ((_rg - float(br.mean())) ** 2
+                             + (_cg - float(bc.mean())) ** 2) < _rad ** 2
         pyro_on = (h <= pyro_until)
         d_extra = dir_off + (float(dir_noise[h]) if dir_noise is not None else 0.0)
-        if pyro_on and rng is not None:
-            d_extra += float(rng.normal(0, 35))     # vents chaotiques
         if have_field:
             speed = interp(sp_h[h]) * speed_mult
             wdir = di_h[h] + d_extra
@@ -209,13 +242,18 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
 
         if speed_mult_h is not None:
             speed = speed * float(speed_mult_h[h])
+        if pyro_on and rng is not None and pyro_mask.any():
+            # vents chaotiques de l'orage de feu, localises sur le foyer
+            _a = np.radians(float(rng.normal(0, 35)))
+            _ca, _sa = np.cos(_a), np.sin(_a)
+            pe, pn = (np.where(pyro_mask, pe * _ca - pn * _sa, pe),
+                      np.where(pyro_mask, pe * _sa + pn * _ca, pn))
         pmag = np.hypot(pe, pn) + 1e-9
         pe_u, pn_u = pe / pmag, pn / pmag
 
         cal_eff = cal_mult * (float(cal_h[h]) if cal_h is not None else 1.0)
-        if pyro_on:
-            cal_eff *= 1.35                     # intensification convective
-        ros = _ros_grid(speed, rh, fuel_grid, temp, cal_eff, soil)
+        cal_grid = np.where(pyro_mask, cal_eff * 1.35, cal_eff) if pyro_on             else cal_eff                        # intensification convective locale
+        ros = _ros_grid(speed, rh, fuel_grid, temp, cal_grid, soil)
         if suppression:
             # Firefighting model: ground crews + air support (Canadairs, Dash,
             # helicopters). Effectiveness ramps up over ~18 h as resources
@@ -258,22 +296,28 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
             recent = burned & (ign >= h - 3) & ~contained
             if h < 3:
                 recent = recent | (dom['seed_mask'] & ~contained)
+            recent_py = recent & pyro_mask if pyro_on else recent
             fr_r, fr_c = np.where(recent)
+            fp_r, fp_c = np.where(recent_py)
             if len(fr_r):
                 for rate, dmin, dmax in ((pyro_rate, 2000, 8000), (0.35, 300, 1500)):
                     if rate <= 0:
                         continue
+                    sr, sc2 = (fp_r, fp_c) if dmin >= 2000 else (fr_r, fr_c)
+                    if not len(sr):
+                        continue
                     for _ in range(int(rng.poisson(rate))):
-                        i = int(rng.integers(len(fr_r)))
+                        i = int(rng.integers(len(sr)))
                         dist_m = float(rng.uniform(dmin, dmax))
                         ang = np.radians(float(rng.normal(0, 20)))
-                        ex, ny = pe_u[fr_r[i], fr_c[i]], pn_u[fr_r[i], fr_c[i]]
+                        ex, ny = pe_u[sr[i], sc2[i]], pn_u[sr[i], sc2[i]]
                         ca, sa = np.cos(ang), np.sin(ang)
                         ex2, ny2 = ex * ca - ny * sa, ex * sa + ny * ca
-                        rr = fr_r[i] + int(round(ny2 * dist_m / cell_lat_m))
-                        cc = fr_c[i] + int(round(ex2 * dist_m / cell_lat_m))
+                        rr = sr[i] + int(round(ny2 * dist_m / cell_lat_m))
+                        cc = sc2[i] + int(round(ex2 * dist_m / cell_lat_m))
                         if (0 <= rr < nrows and 0 <= cc < ncols
-                                and not burned[rr, cc] and fuel_grid[rr, cc] > 0.2):
+                                and not burned[rr, cc] and fuel_grid[rr, cc] > 0.2
+                                and rng.random() < min(1.0, (555.0 / cell_lat_m) ** 2)):
                             burned[rr, cc] = True
                             ign[rr, cc] = h
 
@@ -283,7 +327,12 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
             # (a) CONTAINMENT: crews hold sections of the fire edge. Capacity
             # ~4 cells/h (≈2 km of line) at normal strength, easier where the
             # local wind is weak (flanks/rear), and it HOLDS once set.
-            cap = 4.0 * supp_level * supp_mult * ramp_c
+            # cap_mult ~ nb d'incendies se partageant les moyens : rendements
+            # decroissants (sqrt) ; 555/cell_lat_m rend la capacite (km de
+            # ligne/h) invariante a la resolution du raster (calibree a 500 m)
+            _cm = np.sqrt(max(1.0, sc.get('cap_mult', 1.0)))
+            cap = (4.0 * supp_level * supp_mult * ramp_c * _cm
+                   * (555.0 / dom['cell_lat_m']))
             n_cont = int(cap) + (1 if rng.random() < (cap % 1.0) else 0)
             if n_cont > 0:
                 edge = burned & ~contained & binary_dilation(~burned & (fuel_grid > 0), _ones33)
@@ -303,18 +352,25 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
                     ue_m = float(pe_u[act_r, act_c].mean())
                     vn_m = float(pn_u[act_r, act_c].mean())
                     proj = act_r * (-vn_m) + act_c * ue_m   # row axis points south
-                    i_head = int(np.argmax(proj))
-                    hr, hc = int(act_r[i_head]), int(act_c[i_head])
-                    cr = hr - int(round(vn_m * 4))          # ~2 km devant la tête
-                    cc = hc + int(round(ue_m * 4))
+                    order_p = np.argsort(-proj)
+                    heads, n_lines = [], max(1, int(round(np.sqrt(
+                        max(1.0, sc.get('cap_mult', 1.0))))))
+                    for i_h in order_p.tolist():
+                        hr, hc = int(act_r[i_h]), int(act_c[i_h])
+                        if all(abs(hr - a) + abs(hc - b) > 12 for a, b in heads):
+                            heads.append((hr, hc))
+                        if len(heads) >= n_lines:
+                            break
                     half = max(2, int(round(4 * supp_level * ramp_c)))
-                    # ligne perpendiculaire à la direction de propagation
                     px, py = -vn_m, -ue_m
-                    for t in range(-half, half + 1):
-                        rr2 = cr + int(round(py * t))
-                        cc2 = cc + int(round(px * t))
-                        if 0 <= rr2 < nrows and 0 <= cc2 < ncols:
-                            fuel_grid[rr2, cc2] *= 0.08
+                    for hr, hc in heads:
+                        cr = hr - int(round(vn_m * 4))      # devant la tête
+                        cc = hc + int(round(ue_m * 4))
+                        for t in range(-half, half + 1):
+                            rr2 = cr + int(round(py * t))
+                            cc2 = cc + int(round(px * t))
+                            if 0 <= rr2 < nrows and 0 <= cc2 < ncols:
+                                fuel_grid[rr2, cc2] *= 0.08
 
         if want_meta:
             m = burned

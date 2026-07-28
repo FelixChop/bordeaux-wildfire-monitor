@@ -14,7 +14,7 @@ from pathlib import Path
 from threading import Thread
 import time
 
-from flask import Flask, render_template, jsonify, Response, request
+from flask import Flask, render_template, jsonify, Response, request, redirect
 import requests
 
 # Imports from local modules
@@ -472,12 +472,12 @@ def api_france_air_png():
 
 @app.route('/france')
 def france():
-    return render_template('france.html')
+    return redirect('/?zone=france', code=302)
 
 
 @app.route('/zone')
 def zone_page():
-    return render_template('index.html')
+    return _html('index.html')
 
 
 @app.route('/api/fires')
@@ -835,7 +835,8 @@ def compute_zone_ensemble(zid, lutte='med'):
     ent = z['ens'].get(lutte)
     if ent and ent.get('ver') == ver:
         return ent['views']
-    if not _sim_lock.acquire(blocking=False):
+    _lk = _fr_lock if zid == 'france' else _sim_lock
+    if not _lk.acquire(blocking=False):
         return (ent or {}).get('views')
     try:
         ent = z['ens'].get(lutte)
@@ -860,16 +861,19 @@ def compute_zone_ensemble(zid, lutte='med'):
                 if (w.get('timestamp') or '') >= now_key]
         lat0, lon0 = z['sim_bbox'][1], z['sim_bbox'][0]
         lat1, lon1 = z['sim_bbox'][3], z['sim_bbox'][2]
+        is_fr = (zid == 'france')
+        n_fires = len([c for c in (z['latest'].get('clusters') or []) if c.get('active')]) if is_fr else 1
         store = simulate_ensemble(
             active, wind, wind_field=wfx, veg_fuel=z.get('veg'),
             veg_bbox=z['sim_bbox'], max_hours=168,
-            n_runs=int(os.getenv('ZONE_RUNS', '12')),
-            scenario={'supp_level': _LUTTE.get(lutte, 1.0)},
+            n_runs=int(os.getenv('FR_RUNS', '8')) if is_fr else int(os.getenv('ZONE_RUNS', '12')),
+            scenario={'supp_level': _LUTTE.get(lutte, 1.0),
+                      'cap_mult': float(np.clip(n_fires, 1, 15))},
             smk_bbox=(lat0, lon0, lat1, lon1))
         if store is None:
             z['ens'][lutte] = {'ver': ver, 'views': {}}
             return {}
-        store['smoke_k'] = 1.0
+        store['smoke_k'] = calibrate_smoke_k()   # même ancrage CAMS que la Gironde
         views = {}
         for v in _VIEWS:
             views[v] = _normalize_ts(derive_view(store, v))
@@ -877,7 +881,7 @@ def compute_zone_ensemble(zid, lutte='med'):
         print(f"✓ Ensemble zone {zid} lutte={lutte} prêt")
         return views
     finally:
-        _sim_lock.release()
+        _lk.release()
 
 
 def fetch_pyro_watch(lat, lon, hotspots):
@@ -975,17 +979,8 @@ def update_data():
                 fr = fetch_france_fires()
                 _layer_cache['france_fires'] = (time.time(), fr)
                 _refresh_france_zone(fr)
-                for c in _france_top_clusters(3):
-                    zz = _get_zone(c['zone'])
-                    for _ in range(40):
-                        if zz.get('ready'):
-                            break
-                        time.sleep(2)
-                    for lv in ('med', 'low', 'high'):
-                        try:
-                            compute_zone_ensemble(zz['id'], lv)
-                        except Exception as e2:
-                            print(f"ens {zz['id']}/{lv} err: {e2}")
+                # les ensembles nationaux tournent dans leur propre thread
+                # (_france_ens_loop) pour ne pas retarder le cycle horaire
             except Exception as e:
                 print(f"france precompute error: {e}")
 
@@ -1088,12 +1083,16 @@ def generate_map_html():
 
     return m._repr_html_()
 
+def _html(t):
+    resp = Response(render_template(t), mimetype='text/html')
+    resp.headers['Cache-Control'] = 'no-cache'
+    return resp
+
+
 @app.route('/')
 def index():
-    """Bordeaux map by default; national overview on feux-de-foret.fr."""
-    if 'feux-de-foret' in (request.host or ''):
-        return render_template('index.html')   # app unifiée, ZONE=france côté client
-    return render_template('index.html')
+    """Bordeaux map by default; national view on feux-de-foret.fr."""
+    return _html('index.html')
 
 
 def _hour_bucket(ts):
@@ -1160,6 +1159,7 @@ def api_fire_history():
 
 _sim_cache = {'key': None, 'data': None}
 _sim_lock = __import__('threading').Lock()
+_fr_lock = __import__('threading').Lock()   # ensembles nationaux, independants
 
 # ---- interactive scenario dashboard ---------------------------------------
 _LVL = ('low', 'med', 'high')
@@ -1262,8 +1262,23 @@ def api_scenario():
         view_f = request.args.get('view', 'ref')
         if not (view_f in _VIEWS or (view_f.startswith('m') and view_f[1:].isdigit())):
             view_f = 'ref'
-        data_f = compute_france_scenario(view_f, lutte)
-        return jsonify(data_f), (200 if data_f.get('n_frames') else 503)
+        if not z.get('ready'):
+            # zone en cours de chargement : servir les vues warm si présentes
+            d0 = ((z.get('ens') or {}).get(lutte) or {}).get('views', {}).get(view_f)
+            if d0:
+                d0 = dict(d0); d0['lutte'] = lutte
+                return jsonify(d0)
+            return jsonify({'error': 'Zone loading'}), 503
+        views_f = compute_zone_ensemble('france', lutte)
+        data_f = (views_f or {}).get(view_f)
+        if data_f is None and views_f is not None and z['ens'].get(lutte, {}).get('store') is not None:
+            from src.fire_front import derive_view
+            data_f = _normalize_ts(derive_view(z['ens'][lutte]['store'], view_f))
+            views_f[view_f] = data_f
+        if data_f is not None:
+            data_f = dict(data_f); data_f['lutte'] = lutte
+        return (jsonify(data_f if data_f else {'error': 'Computing'}),
+                (200 if data_f else 503))
     if z is not None:
         if not z.get('ready'):
             return jsonify({'error': 'Zone loading'}), 503
@@ -2024,8 +2039,11 @@ def api_communes():
     z = _zone_from_req()
     if z is not None and z.get('id') == 'france':
         def prod_fr():
-            r = requests.get('https://geo.api.gouv.fr/departements',
-                             params={'format': 'geojson', 'geometry': 'contour'},
+            # geo.api.gouv.fr ne fournit pas les contours des departements en
+            # geojson -> source france-geojson (contours simplifies, statiques)
+            r = requests.get('https://raw.githubusercontent.com/gregoiredavid/'
+                             'france-geojson/master/'
+                             'departements-version-simplifiee.geojson',
                              timeout=60)
             if r.status_code != 200:
                 return None
@@ -2150,6 +2168,13 @@ del _w
 
 def _france_boot():
     try:
+        for _lv in _LUTTE:
+            _w2 = _warm_load(f'france_views_{_lv}.json')
+            if _w2 and _w2.get('views'):
+                ZONES.setdefault('france', {'id': 'france', 'ready': False, 'ens': {}})
+                ZONES['france']['ens'][_lv] = {'ver': _w2.get('ver'),
+                                               'views': _w2['views']}
+                print(f"✓ Warm: ensemble national lutte={_lv}")
         saved = _warm_load('geo_names.json')
         if saved:
             _geo_names.update({tuple(map(float, k.split('|'))): v
@@ -2163,7 +2188,27 @@ def _france_boot():
         print(f"france boot error: {e}")
 
 
+def _france_ens_loop():
+    """Recalcule les ensembles nationaux en continu (ver change chaque heure) ;
+    sert toujours la derniere version terminee pendant le calcul."""
+    time.sleep(45)
+    while True:
+        try:
+            if ZONES.get('france', {}).get('ready'):
+                for lv in ('med', 'low', 'high'):
+                    compute_zone_ensemble('france', lv)
+                    ent_fr = ZONES['france']['ens'].get(lv)
+                    if ent_fr and ent_fr.get('views'):
+                        _warm_save(f'france_views_{lv}.json',
+                                   {'ver': ent_fr['ver'],
+                                    'views': ent_fr['views']})
+        except Exception as e:
+            print(f"france ens loop err: {e}")
+        time.sleep(300)
+
+
 Thread(target=_france_boot, daemon=True).start()
+Thread(target=_france_ens_loop, daemon=True).start()
 
 # Start background data fetch thread at import time so it also runs under
 # gunicorn (which never executes the __main__ block). update_data() does its
