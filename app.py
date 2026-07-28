@@ -2197,6 +2197,9 @@ def _france_boot():
                                for k, v in saved.items()})
         fr0 = _warm_load('france_fires.json')
         if fr0 and fr0.get('hotspots'):
+            # /api/fires servi immediatement aussi (age force a ~55 min :
+            # le fetch frais qui suit le remplacera)
+            _layer_cache['france_fires'] = (time.time() - 3300, fr0)
             _refresh_france_zone(fr0)      # zone prete en ~5 s (etat precedent)
             print("✓ Warm: zone France servie depuis le disque")
         fr = fetch_france_fires()

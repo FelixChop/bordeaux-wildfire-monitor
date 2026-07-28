@@ -196,6 +196,9 @@
       .timeline{left:50%;right:auto;transform:translateX(-50%);width:min(680px,calc(100vw - 380px));
         border:1px solid var(--line);border-radius:16px;bottom:14px}
     }
+    .leaflet-popup-content-wrapper{background:rgba(20,16,13,.97);color:#f5f0ec;
+      border:1px solid #3a2a22;border-radius:12px}
+    .leaflet-popup-tip{background:rgba(20,16,13,.97)}
   </style>
 </head>
 <body>
@@ -309,28 +312,34 @@ const map=L.map('map',{zoomControl:false,attributionControl:false,preferCanvas:t
 L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{maxZoom:19}).addTo(map);
 // frontières des communes (contours officiels), à la place du marqueur
 fetch(zu('/api/communes')).then(r=>r.json()).then(gj=>{
-  L.geoJSON(gj,{style:{color:'rgba(255,255,255,.38)',weight:1,fill:false,interactive:true},
-    onEachFeature:(f,ly)=>ly.bindTooltip(f.properties.nom,{sticky:true,direction:'top'})}).addTo(map);
+  L.geoJSON(gj,{style:{color:'rgba(255,255,255,.38)',weight:1,fill:false},
+    interactive:false}).addTo(map);
 }).catch(()=>{});
 let zoomed=false;
 function lockView(){ if(!zoomed) map.fitBounds(VIEW,{padding:[6,6]}); }
-function toggleZoom(){
-  zoomed=!zoomed;
+function enterZoom(center,dz){
+  const base=map.getBoundsZoom(VIEW);
+  const target=zoomed?Math.min(map.getZoom()+dz,base+4):base+1.6;
+  zoomed=true;
+  map.dragging.enable();
+  if(map.touchZoom)map.touchZoom.enable();
+  map.setMaxBounds(VIEW.pad(0.05));
+  map.setView(center||map.getCenter(), target, {animate:true});
   const b=$('zoomBtn');
-  if(zoomed){
-    map.dragging.enable();
-    if(map.touchZoom)map.touchZoom.enable();
-    map.setMaxBounds(VIEW.pad(0.05));
-    map.setView(map.getCenter(), map.getBoundsZoom(VIEW)+1.6, {animate:true});
-    b.textContent='🗺 France entière'; b.style.background='rgba(230,110,40,.85)';
-  }else{
-    map.dragging.disable();
-    if(map.touchZoom)map.touchZoom.disable();
-    map.setMaxBounds(null);
-    map.fitBounds(VIEW,{padding:[6,6]});
-    b.textContent='🔍 Zoom'; b.style.background='';
-  }
+  b.textContent='🗺 France entière'; b.style.background='rgba(230,110,40,.85)';
 }
+function exitZoom(){
+  zoomed=false;
+  map.dragging.disable();
+  if(map.touchZoom)map.touchZoom.disable();
+  map.setMaxBounds(null);
+  map.fitBounds(VIEW,{padding:[6,6]});
+  const b=$('zoomBtn');
+  b.textContent='🔍 Zoom'; b.style.background='';
+}
+function toggleZoom(){ zoomed?exitZoom():enterZoom(); }
+// double-clic (ou double-tap) : zoom progressif centré sur le point
+map.on('dblclick',e=>{ if(ZONE==='france') enterZoom(e.latlng,1); });
 window.addEventListener('resize', ()=>{ clearTimeout(window._rz); window._rz=setTimeout(lockView,200); });
 
 // layers
@@ -533,11 +542,16 @@ async function addClusterTargets(){
     clusterLayer=L.layerGroup().addTo(map);
     d.clusters.filter(c=>c.active).forEach(c=>{
       // cible cliquable (zoom vers la fiche locale)
+      const fmt=iso=>{if(!iso)return '—';const dd=new Date(iso.replace(' ','T')+(iso.endsWith('Z')?'':'Z'));
+        return dd.toLocaleString('fr-FR',{weekday:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});};
       L.circleMarker([c.lat,c.lon],{radius:Math.min(14+Math.sqrt(c.frp_24h)*.4,30),
         color:'rgba(255,152,0,.55)',weight:1.5,dashArray:'3,4',fill:true,
         fillColor:'#ff9800',fillOpacity:.06})
-        .bindTooltip((c.name||'incendie')+' — toucher pour zoomer',{direction:'top'})
-        .on('click',()=>{location.href='/zone?zone='+encodeURIComponent(c.zone);})
+        .bindPopup(`<div style="font-size:12.5px;line-height:1.55"><b style="color:#ff9800">${c.name||'incendie'}</b><br>`+
+          `${c.n_24h} foyer(s) détecté(s) sur 24 h<br>`+
+          `intensité ${Math.round(c.frp_24h).toLocaleString('fr-FR')} MW<br>`+
+          `dernière détection : ${fmt(c.last_detection)}<br>`+
+          `<a href="/zone?zone=${encodeURIComponent(c.zone)}" style="display:inline-block;margin-top:6px;background:#ff5722;color:#fff;text-decoration:none;padding:5px 11px;border-radius:8px;font-weight:700;font-size:12px">→ fiche détaillée &amp; simulation</a></div>`)
         .addTo(clusterLayer);
     });
   }catch(e){}
