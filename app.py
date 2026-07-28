@@ -553,6 +553,87 @@ def fetch_vegetation_bbox(bbox):
 _air_block_until = 0.0
 
 
+def fetch_air_sensors_fallback():
+    """Qualite de l'air OBSERVEE via les capteurs sensor.community (reseau
+    ouvert, sans cle) — secours quand l'API CAMS est rate-limitee.
+    Produit une frame 'maintenant' sur la grille France."""
+    try:
+        r = requests.get('https://data.sensor.community/airrohr/v1/filter/'
+                         'box=41.2,-5.2,51.3,9.8', timeout=60)
+        if r.status_code != 200:
+            return None
+        n_lat, n_lon = 6, 7
+        lon0, lat0, lon1, lat1 = FR_SIM_BBOX
+        s = np.zeros((n_lat, n_lon))
+        c = np.zeros((n_lat, n_lon))
+        for e in r.json():
+            try:
+                la = float(e['location']['latitude'])
+                lo = float(e['location']['longitude'])
+                for v in e.get('sensordatavalues', []):
+                    if v.get('value_type') == 'P2':
+                        pm = float(v['value'])
+                        if 0 <= pm < 500:
+                            i = int((la - lat0) / (lat1 - lat0) * n_lat)
+                            j = int((lo - lon0) / (lon1 - lon0) * n_lon)
+                            if 0 <= i < n_lat and 0 <= j < n_lon:
+                                s[i, j] += pm
+                                c[i, j] += 1
+            except (KeyError, ValueError, TypeError):
+                continue
+        if not c.any():
+            return None
+        pm = np.where(c > 0, s / np.maximum(c, 1), np.nan)
+        pm = np.where(np.isnan(pm), np.nanmean(pm), pm)
+
+        def _eaqi(p):
+            bp = [(0, 0), (10, 20), (20, 40), (25, 60), (50, 80),
+                  (75, 100), (150, 150)]
+            for (x0, y0), (x1, y1) in zip(bp, bp[1:]):
+                if p <= x1:
+                    return y0 + (p - x0) / (x1 - x0) * (y1 - y0)
+            return 150.0
+        aqi = np.vectorize(_eaqi)(pm)
+        now = datetime.utcnow().strftime('%Y-%m-%dT%H:00')
+        print(f"✓ Air capteurs sensor.community : {int(c.sum())} mesures")
+        return {'times': [now], 'aqi': [np.round(aqi, 1).tolist()],
+                'pm25': [np.round(pm, 1).tolist()],
+                'bbox': [FR_SIM_BBOX[1], FR_SIM_BBOX[0],
+                         FR_SIM_BBOX[3], FR_SIM_BBOX[2]],
+                'source': 'sensor.community (mesures capteurs)'}
+    except Exception as e:
+        print(f"sensors fallback err: {e}")
+        return None
+
+
+def _air_subset(bbox):
+    """Champ air d'une zone DECOUPE dans le champ France stocke (0 appel API)."""
+    fr = (ZONES.get('france') or {}).get('air_field')
+    if not fr or not fr.get('aqi'):
+        return None
+    la0, lo0, la1, lo1 = fr['bbox']
+    A = np.asarray(fr['aqi'], dtype=float)
+    P = np.asarray(fr.get('pm25') or fr['aqi'], dtype=float)
+    T, nl, nc = A.shape
+    zlon0, zlat0, zlon1, zlat1 = bbox
+    lats = np.linspace(zlat0, zlat1, 6)
+    lons = np.linspace(zlon0, zlon1, 7)
+    gy = np.clip((lats - la0) / (la1 - la0) * (nl - 1), 0, nl - 1)
+    gx = np.clip((lons - lo0) / (lo1 - lo0) * (nc - 1), 0, nc - 1)
+    i0 = np.floor(gy).astype(int); j0 = np.floor(gx).astype(int)
+    i1 = np.minimum(i0 + 1, nl - 1); j1 = np.minimum(j0 + 1, nc - 1)
+    wy = (gy - i0)[:, None]; wx = (gx - j0)[None, :]
+
+    def sub(M):
+        out = (M[:, i0][:, :, j0] * (1 - wy) * (1 - wx)
+               + M[:, i1][:, :, j0] * wy * (1 - wx)
+               + M[:, i0][:, :, j1] * (1 - wy) * wx
+               + M[:, i1][:, :, j1] * wy * wx)
+        return np.round(out, 1).tolist()
+    return {'times': fr['times'], 'aqi': sub(A), 'pm25': sub(P),
+            'bbox': [zlat0, zlon0, zlat1, zlon1]}
+
+
 def fetch_air_field_bbox(bbox):
     """Champ air horaire (EAQI+PM2.5) pour une bbox de zone."""
     global _air_block_until
@@ -688,7 +769,8 @@ def _zone_refresh(z):
             'air': None,
             'pyro_watch': fetch_pyro_watch(clat, clon, hotspots),
         }
-        z['air_field'] = fetch_air_field_bbox(bbox) or z.get('air_field')
+        z['air_field'] = (_air_subset(bbox) or fetch_air_field_bbox(bbox)
+                          or z.get('air_field'))
         z['last_update'] = datetime.utcnow()
         z['ready'] = True
         # NDVI en dernier : GIBS peut prendre >1 min, la fiche est deja servie
@@ -750,7 +832,8 @@ def _refresh_france_zone(fr):
             z['air_field'] = af_new
             _warm_save('france_air.json', af_new)
         elif z.get('air_field') is None:
-            z['air_field'] = _warm_load('france_air.json')
+            z['air_field'] = (_warm_load('france_air.json')
+                              or fetch_air_sensors_fallback())
         top = clusters[0] if clusters else None
         z['latest'] = {
             'timestamp': datetime.utcnow().isoformat(),
@@ -2010,7 +2093,8 @@ def calibrate_smoke_k():
         from src.fire_front import hindcast_smoke, _SMK_BBOX, _SMK_NR, _SMK_NC
         af = _cached('airfield', 1800, fetch_air_field)
         if not af or not latest_data or _wind_field is None:
-            return 1.0
+            saved_k = _warm_load('smoke_k.json')
+            return float(saved_k['k']) if saved_k else 1.0
         times_af = af['times']
         now_key = datetime.utcnow().strftime('%Y-%m-%dT%H:00')
         n_past = sum(1 for t in times_af if t < now_key)
@@ -2054,6 +2138,7 @@ def calibrate_smoke_k():
         if len(ratios) < 6:
             return 1.0
         k = float(np.clip(np.median(ratios), 0.25, 4.0))
+        _warm_save('smoke_k.json', {'k': float(k)})
         print(f"✓ Calibration fumée vs CAMS : k={k:.2f} ({len(ratios)} heures)")
         return k
     except Exception as e:
