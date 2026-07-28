@@ -95,7 +95,7 @@ async function load(){
         `${c.n_24h} foyer(s) détecté(s) sur 24 h · intensité ${c.frp_24h.toLocaleString('fr-FR')} MW<br>`+
         `dernière détection : ${fmtT(c.last_detection)}`+
         (gironde?`<br><a href="https://incendiebordeaux.fr">→ fiche détaillée & simulation</a>`
-                :`<br><span style="color:#b8a79d;font-size:11px">fiche locale avec simulation : bientôt</span>`)+
+                :`<br><a href="/zone?zone=${c.zone}">→ fiche détaillée & simulation</a>`)+
         `</div>`);
     });
     document.getElementById('loading').classList.add('hide');

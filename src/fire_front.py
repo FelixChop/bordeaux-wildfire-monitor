@@ -410,7 +410,7 @@ def simulate_monte_carlo(hotspots, wind_records, wind_field=None, veg_fuel=None,
 
 def simulate_ensemble(hotspots, wind_records, wind_field=None, veg_fuel=None,
                       veg_bbox=None, max_hours=168, n_runs=12, rng_seed=0,
-                      pyro_daily_p=0.07, scenario=None):
+                      pyro_daily_p=0.07, scenario=None, smk_bbox=None):
     if binary_dilation is None:
         return None
     dom = _prepare_domain(hotspots, veg_fuel, veg_bbox)
@@ -448,10 +448,10 @@ def simulate_ensemble(hotspots, wind_records, wind_field=None, veg_fuel=None,
 
     return {'igns': np.stack(igns), 'pyro': np.array(pyro_flags),
             'dom': dom, 'meta': meta, 'n_hours': n_hours, 'n_runs': n_runs,
-            'wind_field': wind_field}
+            'wind_field': wind_field, 'smk_bbox': smk_bbox}
 
 
-# Smoke transport grid (matches the air-quality overlay bbox)
+# Default smoke transport grid (Gironde) — overridable per zone
 _SMK_BBOX = (44.20, -1.75, 45.55, -0.25)   # lat0, lon0, lat1, lon1
 _SMK_NR, _SMK_NC = 32, 40
 
@@ -497,7 +497,7 @@ _BURN_WIN = 12          # hours a cell keeps emitting after ignition
 _DEP = 0.985            # hourly dry-deposition loss on the column burden
 
 
-def smoke_engine(emission_fn, wf, times, n_hours, emit_hours, k_cal=1.0):
+def smoke_engine(emission_fn, wf, times, n_hours, emit_hours, k_cal=1.0, smk_bbox=None):
     """Column-burden transport: B [ug/m2] advected by the LOCAL wind field,
     diffused, deposited; ground concentration C = B / H_mix(t) [ug/m3].
 
@@ -506,7 +506,7 @@ def smoke_engine(emission_fn, wf, times, n_hours, emit_hours, k_cal=1.0):
     emission_fn(h) -> burden addition grid [ug/m2] for hour h.
     """
     from scipy.ndimage import map_coordinates, gaussian_filter
-    la0, lo0, la1, lo1 = _SMK_BBOX
+    la0, lo0, la1, lo1 = smk_bbox or _SMK_BBOX
     lat_ax = np.linspace(la1, la0, _SMK_NR)     # row 0 = north
     lon_ax = np.linspace(lo0, lo1, _SMK_NC)
     LON, LAT = np.meshgrid(lon_ax, lat_ax)
@@ -544,8 +544,8 @@ def smoke_engine(emission_fn, wf, times, n_hours, emit_hours, k_cal=1.0):
     return out
 
 
-def _smoke_geometry(dom=None):
-    la0, lo0, la1, lo1 = _SMK_BBOX
+def _smoke_geometry(smk_bbox=None):
+    la0, lo0, la1, lo1 = smk_bbox or _SMK_BBOX
     la_span = (la1 - la0) / (_SMK_NR - 1) * 111_320
     lo_span = ((lo1 - lo0) / (_SMK_NC - 1) * 111_320
                * np.cos(np.radians((la0 + la1) / 2)))
@@ -553,19 +553,20 @@ def _smoke_geometry(dom=None):
 
 
 def _smoke_series(store, ig_sel, emit_hours, k_cal=1.0):
+    smk_bbox = store.get('smk_bbox') or _SMK_BBOX
     """PM2.5 [ug/m3] smoke grids of the SIMULATED fire (one member run)."""
     dom = store['dom']
     wf = store.get('wind_field')
     n_hours = store['n_hours']
     times = ((wf or {}).get('times')
              or [m.get('timestamp') for m in (store.get('meta') or [])])
-    la0, lo0, la1, lo1 = _SMK_BBOX
+    la0, lo0, la1, lo1 = smk_bbox
     glat, glon = dom['lat_axis'], dom['lon_axis']
     ri = np.clip(((la1 - glat) / (la1 - la0) * (_SMK_NR - 1)).astype(int), 0, _SMK_NR - 1)
     ci = np.clip(((glon - lo0) / (lo1 - lo0) * (_SMK_NC - 1)).astype(int), 0, _SMK_NC - 1)
     RI = np.repeat(ri[:, None], len(glon), 1)
     CI = np.repeat(ci[None, :], len(glat), 0)
-    flux_b = _EMIT_FLUX * (dom['cell_lat_m'] ** 2) / _smoke_geometry()
+    flux_b = _EMIT_FLUX * (dom['cell_lat_m'] ** 2) / _smoke_geometry(smk_bbox)
     seed = dom['seed_mask']
 
     def emission(h):
@@ -576,10 +577,10 @@ def _smoke_series(store, ig_sel, emit_hours, k_cal=1.0):
         np.add.at(emit, (RI.ravel(), CI.ravel()), burning.ravel())
         return emit * flux_b
 
-    return smoke_engine(emission, wf, times, n_hours, emit_hours, k_cal)
+    return smoke_engine(emission, wf, times, n_hours, emit_hours, k_cal, smk_bbox)
 
 
-def hindcast_smoke(hotspot_offsets, wind_field, n_hours, emit_hours, k_cal=1.0):
+def hindcast_smoke(hotspot_offsets, wind_field, n_hours, emit_hours, k_cal=1.0, smk_bbox=None):
     """Replay the REAL fire's smoke over past hours (for calibration).
 
     hotspot_offsets: [(row, col, ignition_hour_offset)] on the smoke grid;
@@ -587,7 +588,7 @@ def hindcast_smoke(hotspot_offsets, wind_field, n_hours, emit_hours, k_cal=1.0):
     src = {}
     for r, c, h0 in hotspot_offsets:
         src.setdefault(int(h0), []).append((r, c))
-    flux_b = _EMIT_FLUX * 1.4e5 / _smoke_geometry()
+    flux_b = _EMIT_FLUX * 1.4e5 / _smoke_geometry(smk_bbox)
 
     def emission(h):
         emit = np.zeros((_SMK_NR, _SMK_NC))
@@ -598,7 +599,7 @@ def hindcast_smoke(hotspot_offsets, wind_field, n_hours, emit_hours, k_cal=1.0):
         return emit
 
     times = (wind_field or {}).get('times')
-    return smoke_engine(emission, wind_field, times, n_hours, emit_hours, k_cal)
+    return smoke_engine(emission, wind_field, times, n_hours, emit_hours, k_cal, smk_bbox)
 
 
 def derive_view(store, view='ref', emit_every=3):
@@ -666,6 +667,7 @@ def derive_view(store, view='ref', emit_every=3):
             'n_runs': n, 'view': view, 'member': int(member),
             'member_pyro': bool(store['pyro'][member]),
             'pyro_runs': int(store['pyro'].sum()),
-            'smoke_bbox': list(_SMK_BBOX), 'smoke_shape': [_SMK_NR, _SMK_NC],
+            'smoke_bbox': list(store.get('smk_bbox') or _SMK_BBOX),
+            'smoke_shape': [_SMK_NR, _SMK_NC],
             'frames': frames}
 

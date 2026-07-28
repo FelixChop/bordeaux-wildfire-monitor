@@ -211,7 +211,7 @@
   </div>
 
   <div class="menu" id="menu" style="display:none">
-    <div class="menu-head"><span>🔥 Incendie Bordeaux</span><b onclick="toggleMenu()">✕</b></div>
+    <div class="menu-head"><span id="menuTitle">🔥 Incendie Bordeaux</span><b onclick="toggleMenu()">✕</b></div>
     <div class="menu-body">
       <h3>🎛️ Scénarios de simulation <span class="mh-sub">(ensemble de 16 tirages)</span></h3>
       <div class="views" id="views" style="grid-template-columns:1fr 1fr 1fr">
@@ -292,15 +292,17 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script>
+const ZONE=new URLSearchParams(location.search).get('zone')||'';
+const zu=u=>ZONE?u+(u.includes('?')?'&':'?')+'zone='+encodeURIComponent(ZONE):u;
 const BDX=[44.837,-0.579];
 // Vue verrouillée : de l'océan (Lacanau océan) à Bordeaux rive droite.
-const VIEW=L.latLngBounds([[44.33,-1.35],[45.06,-0.45]]);  // Biscarrosse -> Bordeaux rive droite
+let VIEW=L.latLngBounds([[44.33,-1.35],[45.06,-0.45]]);  // défaut Gironde ; remplacé par la zone
 const map=L.map('map',{zoomControl:false,attributionControl:false,preferCanvas:true,
   dragging:false,scrollWheelZoom:false,doubleClickZoom:false,touchZoom:false,
   boxZoom:false,keyboard:false,zoomSnap:0.1}).fitBounds(VIEW);
 L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{maxZoom:19}).addTo(map);
 // frontières des communes (contours officiels), à la place du marqueur
-fetch('/api/communes').then(r=>r.json()).then(gj=>{
+fetch(zu('/api/communes')).then(r=>r.json()).then(gj=>{
   L.geoJSON(gj,{style:{color:'rgba(255,255,255,.38)',weight:1,fill:false,interactive:true},
     onEachFeature:(f,ly)=>ly.bindTooltip(f.properties.nom,{sticky:true,direction:'top'})}).addTo(map);
 }).catch(()=>{});
@@ -332,16 +334,27 @@ async function getJSON(url, tries=20){
 }
 async function boot(){
   try{
-    const data=await getJSON('/api/data');           // wait until data is warm
+    const data=await getJSON(zu('/api/data'));           // wait until data is warm
     const [past,sim,wind,meteo,airF]=await Promise.all([
-      getJSON('/api/fire-history'),
-      getJSON('/api/scenario?view=ref&lutte=med',60),
-      getJSON('/api/windfield').catch(()=>null),
-      fetch('/api/meteosat').then(r=>r.json()).catch(()=>null),
-      fetch('/api/air-field').then(r=>r.ok?r.json():null).catch(()=>null)
+      getJSON(zu('/api/fire-history')),
+      getJSON(zu('/api/scenario?view=ref&lutte=med'),60),
+      getJSON(zu('/api/windfield')).catch(()=>null),
+      fetch(zu('/api/meteosat')).then(r=>r.json()).catch(()=>null),
+      fetch(zu('/api/air-field')).then(r=>r.ok?r.json():null).catch(()=>null)
     ]);
     state.data=data; state.wind=wind; state.meteo=meteo;
     state.past=past; state.sim=sim; state.airField=airF;
+    if(data.zone){
+      if(data.zone.view) VIEW=L.latLngBounds(data.zone.view);
+      if(data.zone.sim_bbox){
+        const b=data.zone.sim_bbox;   // lon0,lat0,lon1,lat1
+        state.vegBounds=[[b[1],b[0]],[b[3],b[2]]];
+      }
+      if(data.zone.name&&ZONE){
+        document.title=data.zone.name+' — feu de forêt : carte & simulation';
+        const mt=document.getElementById('menuTitle'); if(mt) mt.textContent='🔥 '+data.zone.name;
+      }
+    }
     if(sim.pyro_runs!=null&&sim.n_runs)
       setTimeout(()=>{const e=$('pyroProba');if(e)e.textContent=Math.round(sim.pyro_runs/sim.n_runs*100)+' %';},0);
     state.airIdx={};
@@ -372,11 +385,12 @@ function renderStats(){
   const away=fp.distance_to_bordeaux_km>20;
   const lastDet=d.firms&&d.firms.last_detection;
   const sats=(d.firms&&d.firms.satellites||[]).join(', ');
-  $('stats').innerHTML=`
+  const distTiles=(fp.distance_to_bordeaux_km!=null)?`
     <div class="stat fire"><div class="l">🔥 Distance du feu</div><div class="v">${fp.distance_to_bordeaux_km.toFixed(1)} km</div></div>
-    <div class="stat"><div class="l">🔴 Foyers actifs (5 j)</div><div class="v">${fp.n_hotspots}</div></div>
+    <div class="stat ${away?'ok':'warn'}"><div class="l">⚠️ Risque Bordeaux</div><div class="v">${away?'Faible':'À surveiller'}</div></div>`:'';
+  $('stats').innerHTML=`${distTiles}
+    <div class="stat"><div class="l">🔴 Foyers détectés (5 j)</div><div class="v">${fp.n_hotspots}</div></div>
     <div class="stat"><div class="l">💨 Vent moyen (24 h)</div><div class="v">${avgS.toFixed(1)} m/s ${dirLabel(avgD)}</div></div>
-    <div class="stat ${away?'ok':'warn'}"><div class="l">⚠️ Risque Bordeaux</div><div class="v">${away?'Faible':'À surveiller'}</div></div>
     <div class="stat" style="grid-column:1/-1"><div class="l">🛰️ Dernier passage satellite (foyers précis)</div><div class="v">${lastDet?fmtT(lastDet)+' ('+ago(lastDet)+')':'—'}</div></div>
     ${meteoTile(state.meteo)}
     ${pyroTile(d.pyro_watch)}
@@ -487,7 +501,7 @@ function buildDataModal(){
   const s=state.sim||{};
   const names={ref:'🎯 Référence',opt:'🙂 Optimiste',pess:'⚠️ Pessimiste',pyro:'🌩️ Si pyroCb'};
   $('dmView').textContent=`${names[state.view]||state.view} · ${s.n_runs||'?'} tirages (pyroCb dans ${s.pyro_runs??'?'}) · ${s.n_seeds||'?'} foyers de départ`;
-  $('dmSimLink').href='/api/scenario?view='+state.view;
+  $('dmSimLink').href=zu('/api/scenario?view='+state.view+'&lutte='+state.lutte);
   let h='<table><tr><th>échéance (locale)</th><th>h</th><th>surface ha</th><th>p10</th><th>p90</th><th>vent m/s</th><th>hum %</th><th>air °C</th><th>+pts</th></tr>';
   (s.frames||[]).forEach(f=>{
     h+=`<tr><td>${fmtT(f.timestamp)}</td><td>+${f.hour}</td><td>${(f.area_ha||0).toLocaleString('fr-FR')}</td>`+
@@ -502,7 +516,7 @@ async function setView(v){
   initDash();
   $('computing').style.display='flex';
   try{
-    const sim=await getJSON('/api/scenario?view='+v+'&lutte='+state.lutte, 40);
+    const sim=await getJSON(zu('/api/scenario?view='+v+'&lutte='+state.lutte), 40);
     state.sim=sim;
     state.scen.pyro=(v==='pyro'||sim.member_pyro)?'high':'low';
     if(sim.pyro_runs!=null&&sim.n_runs)
@@ -665,8 +679,8 @@ function stop(){ state.playing=false; $('play').textContent='▶'; if(state.time
 // vegetation base layer: ALWAYS on (no toggle) — burned scars darken it
 let vegOverlay=null;
 function addVeg(){
-  // SIM_BBOX élargi : lon[-1.8,-0.2] lat[44.2,45.6]
-  vegOverlay=overlayWithRetry('/api/vegetation.png',[[44.2,-1.8],[45.6,-0.2]],
+  const b=state.vegBounds||[[44.2,-1.8],[45.6,-0.2]];
+  vegOverlay=overlayWithRetry(zu('/api/vegetation.png'),b,
     {opacity:.6,interactive:false}).addTo(map);
 }
 
@@ -705,8 +719,8 @@ function aqiRGB(v){ // même échelle que le backend (0..120)
 }
 function addAirOverlay(){
   const af=state.airField;
-  if(!af){ // fallback : image statique
-    airOverlay=overlayWithRetry('/api/air-quality.png',[[44.2,-1.75],[45.55,-0.25]],
+  if(!af){ // fallback : image statique (Gironde uniquement)
+    if(!ZONE) airOverlay=overlayWithRetry('/api/air-quality.png',[[44.2,-1.75],[45.55,-0.25]],
       {opacity:.8,interactive:false}).addTo(map);
     return;
   }

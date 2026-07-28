@@ -401,7 +401,8 @@ def fetch_france_fires():
         sw = sum(w)
         lat = sum(h['lat'] * wi for h, wi in zip(m, w)) / sw
         lon = sum(h['lon'] * wi for h, wi in zip(m, w)) / sw
-        out.append({'lat': round(lat, 3), 'lon': round(lon, 3),
+        out.append({'zone': f'z{round(lat, 2)}_{round(lon, 2)}',
+                    'lat': round(lat, 3), 'lon': round(lon, 3),
                     'n_total': len(m), 'n_24h': n24,
                     'frp_24h': round(frp24), 'last_detection': last,
                     'active': n24 > 0})
@@ -473,6 +474,11 @@ def france():
     return render_template('france.html')
 
 
+@app.route('/zone')
+def zone_page():
+    return render_template('index.html')
+
+
 @app.route('/api/fires')
 def api_fires():
     """Incendies actifs détectés sur toute la France (clusters)."""
@@ -480,6 +486,281 @@ def api_fires():
     if data is None:
         return jsonify({'clusters': []}), 503
     return jsonify(data)
+
+
+# ---------------------------------------------------------------------------
+# ZONES dynamiques (Phase 2 France) : chaque incendie cliqué devient une zone
+# avec ses données locales (FIRMS, vent, végétation, air, communes, ensemble).
+# ---------------------------------------------------------------------------
+ZONES = {}
+
+
+def _zone_bboxes(lat, lon):
+    sim = (round(lon - 0.8, 2), round(lat - 0.7, 2),
+           round(lon + 0.8, 2), round(lat + 0.7, 2))
+    view = [[round(lat - 0.37, 2), round(lon - 0.45, 2)],
+            [round(lat + 0.36, 2), round(lon + 0.43, 2)]]
+    return sim, view
+
+
+_veg_zone_cache = {}
+
+
+def fetch_vegetation_bbox(bbox):
+    """NDVI fuel map pour une bbox arbitraire (cache par bbox+date)."""
+    lon0, lat0, lon1, lat1 = bbox
+    day = (datetime.utcnow() - timedelta(days=16)).strftime('%Y-%m-%d')
+    key = (bbox, day)
+    if key in _veg_zone_cache:
+        return _veg_zone_cache[key]
+    try:
+        r = None
+        for back in (16, 24, 32):
+            d2 = (datetime.utcnow() - timedelta(days=back)).strftime('%Y-%m-%d')
+            url = ("https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
+                   "?SERVICE=WMS&REQUEST=GetMap&VERSION=1.3.0"
+                   "&LAYERS=MODIS_Terra_NDVI_8Day&STYLES=&CRS=EPSG:4326"
+                   f"&BBOX={lat0},{lon0},{lat1},{lon1}&WIDTH=420&HEIGHT=370"
+                   f"&FORMAT=image/png&TIME={d2}")
+            r = requests.get(url, timeout=25)
+            if r.status_code == 200:
+                break
+        if r is None or r.status_code != 200:
+            return None
+        import matplotlib.image as mpimg
+        img = mpimg.imread(io.BytesIO(r.content), format='png')
+        rgb = (img[:, :, :3] * 255.0)
+        R, G, B = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
+        veg = (G > R) & (G > 40)
+        fuel = np.where(veg, np.clip(G / 150.0, 0.25, 1.0), 0.12)
+        fuel = np.where((R + G + B) < 30, 0.0, fuel)
+        if (fuel > 0).mean() < 0.15:
+            fuel = np.full_like(fuel, 0.6)
+        if len(_veg_zone_cache) > 12:
+            _veg_zone_cache.clear()
+        _veg_zone_cache[key] = fuel
+        return fuel
+    except Exception as e:
+        print(f"veg zone error: {e}")
+        return None
+
+
+def fetch_air_field_bbox(bbox):
+    """Champ air horaire (EAQI+PM2.5) pour une bbox de zone."""
+    lon0, lat0, lon1, lat1 = bbox
+    n_lat, n_lon = 8, 9
+    lats = np.linspace(lat0, lat1, n_lat)
+    lons = np.linspace(lon0, lon1, n_lon)
+    laq, loq = [], []
+    for la in lats:
+        for lo in lons:
+            laq.append(round(float(la), 3))
+            loq.append(round(float(lo), 3))
+    r = requests.get('https://air-quality-api.open-meteo.com/v1/air-quality', params={
+        'latitude': ','.join(map(str, laq)), 'longitude': ','.join(map(str, loq)),
+        'hourly': 'european_aqi,pm2_5', 'past_days': 5, 'forecast_days': 7,
+        'timezone': 'UTC'}, timeout=30)
+    if r.status_code != 200:
+        return None
+    res = r.json()
+    if isinstance(res, dict):
+        res = [res]
+    times = res[0].get('hourly', {}).get('time', [])
+    T = len(times)
+    aqi = np.zeros((T, n_lat, n_lon))
+    pm25 = np.zeros((T, n_lat, n_lon))
+    for idx, x in enumerate(res[:n_lat * n_lon]):
+        h = x.get('hourly', {})
+        a = h.get('european_aqi') or []
+        p = h.get('pm2_5') or []
+        i, j = idx // n_lon, idx % n_lon
+        for t in range(T):
+            aqi[t, i, j] = a[t] if t < len(a) and a[t] is not None else 0
+            pm25[t, i, j] = p[t] if t < len(p) and p[t] is not None else 0
+    return {'times': times, 'bbox': [lat0, lon0, lat1, lon1],
+            'aqi': aqi.round(0).tolist(), 'pm25': pm25.round(1).tolist()}
+
+
+def fetch_wind_field_bbox(bbox, n=6):
+    """Champ de vent 6x6 pour une bbox de zone (past 5 j + prev 8 j)."""
+    lon0, lat0, lon1, lat1 = bbox
+    grid_lats = list(np.linspace(lat0, lat1, n))
+    grid_lons = list(np.linspace(lon0, lon1, n))
+    laq, loq = [], []
+    for la in grid_lats:
+        for lo in grid_lons:
+            laq.append(round(float(la), 4))
+            loq.append(round(float(lo), 4))
+    try:
+        r = requests.get("https://api.open-meteo.com/v1/forecast", params={
+            'latitude': ','.join(map(str, laq)),
+            'longitude': ','.join(map(str, loq)),
+            'hourly': 'wind_speed_10m,wind_direction_10m,relative_humidity_2m,'
+                      'temperature_2m,soil_moisture_0_to_7cm',
+            'past_days': 5, 'forecast_days': 8, 'timezone': 'UTC'}, timeout=25)
+        if r.status_code != 200:
+            return None
+        results = r.json()
+        if isinstance(results, dict):
+            results = [results]
+        times = results[0]['hourly']['time'][:312]
+        arrs = {k: np.zeros((len(times), n, n)) for k in
+                ('speed', 'dir', 'rh', 'temp', 'soil')}
+        keys = {'speed': 'wind_speed_10m', 'dir': 'wind_direction_10m',
+                'rh': 'relative_humidity_2m', 'temp': 'temperature_2m',
+                'soil': 'soil_moisture_0_to_7cm'}
+        defaults = {'speed': 0, 'dir': 270, 'rh': 50, 'temp': 25, 'soil': 0.2}
+        for idx, res in enumerate(results):
+            i, j = idx // n, idx % n
+            hh = res.get('hourly', {})
+            for k, ak in keys.items():
+                arr = hh.get(ak) or []
+                for t in range(len(times)):
+                    v = arr[t] if t < len(arr) else None
+                    arrs[k][t, i, j] = defaults[k] if v is None else v
+        return {'grid_lats': [round(float(x), 4) for x in grid_lats],
+                'grid_lons': [round(float(x), 4) for x in grid_lons],
+                'times': times, **arrs}
+    except Exception as e:
+        print(f"wind zone error: {e}")
+        return None
+
+
+def _zone_refresh(z):
+    """Charge/rafraîchit toutes les données locales d'une zone."""
+    try:
+        bbox = z['sim_bbox']
+        map_key = os.getenv('NASA_FIRMS_MAP_KEY', 'DEMO_KEY')
+        hotspots = []
+        for product in _FIRMS_PRODUCTS:
+            hotspots.extend(_fetch_firms_product(map_key, product, bbox, days=5))
+        last_ts = max((h['timestamp'] for h in hotspots), default=None)
+        sats = sorted({h.get('sat') for h in hotspots})
+        clat, clon = z['lat'], z['lon']
+        z['wind_field'] = fetch_wind_field_bbox(bbox)
+        z['veg'] = fetch_vegetation_bbox(bbox)
+        wind_series = []
+        wf = z['wind_field']
+        if wf:
+            sp = np.asarray(wf['speed']).mean(axis=(1, 2))
+            dr = np.asarray(wf['dir']).mean(axis=(1, 2))
+            rh = np.asarray(wf['rh']).mean(axis=(1, 2))
+            tp = np.asarray(wf['temp']).mean(axis=(1, 2))
+            for i, t in enumerate(wf['times']):
+                wind_series.append({'timestamp': t,
+                                    'wind_speed_10m_ms': float(sp[i]),
+                                    'wind_direction_10m_deg': float(dr[i]),
+                                    'relative_humidity_pct': float(rh[i]),
+                                    'temperature_c': float(tp[i])})
+        z['latest'] = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'zone': {'id': z['id'], 'name': z.get('name', ''),
+                     'view': z['view'], 'sim_bbox': list(bbox)},
+            'fire_perimeter': {'centroid': {'lat': clat, 'lon': clon},
+                               'distance_to_bordeaux_km': None,
+                               'n_hotspots': len(hotspots)},
+            'firms': {'hotspots': hotspots, 'source': 'NASA FIRMS',
+                      'satellites': sats, 'last_detection': last_ts},
+            'wind': {'hourly_wind': wind_series},
+            'air': None,
+            'pyro_watch': fetch_pyro_watch(clat, clon, hotspots),
+        }
+        z['air_field'] = fetch_air_field_bbox(bbox)
+        z['last_update'] = datetime.utcnow()
+        z['ready'] = True
+        print(f"✓ Zone {z['id']} ({z.get('name','')}) prête : {len(hotspots)} foyers")
+    except Exception as e:
+        print(f"zone refresh {z.get('id')} error: {e}")
+        z['error'] = str(e)
+
+
+def _get_zone(zid):
+    """Récupère/crée une zone à partir de son id 'zLAT_LON'."""
+    z = ZONES.get(zid)
+    if z:
+        z['last_access'] = time.time()
+        return z
+    try:
+        la, lo = zid[1:].split('_')
+        lat, lon = float(la), float(lo)
+    except (ValueError, IndexError):
+        return None
+    fires = _cached('france_fires', 3600, fetch_france_fires) or {'clusters': []}
+    best, bd = None, 0.35
+    for c in fires['clusters']:
+        d = abs(c['lat'] - lat) + abs(c['lon'] - lon)
+        if d < bd:
+            best, bd = c, d
+    sim, view = _zone_bboxes(lat, lon)
+    z = {'id': zid, 'lat': lat, 'lon': lon,
+         'name': (best or {}).get('name', ''),
+         'sim_bbox': sim, 'view': view, 'ready': False,
+         'ens': {}, 'last_access': time.time()}
+    ZONES[zid] = z
+    Thread(target=_zone_refresh, args=(z,), daemon=True).start()
+    return z
+
+
+def _zone_from_req():
+    zid = request.args.get('zone', '')
+    if not zid or zid == 'gironde':
+        return None
+    return _get_zone(zid)
+
+
+def compute_zone_ensemble(zid, lutte='med'):
+    """Ensemble Monte Carlo local d'une zone (à la demande, puis caché)."""
+    z = ZONES.get(zid)
+    if not z or not z.get('ready'):
+        return None
+    from src.fire_front import simulate_ensemble, derive_view
+    ver = f"v7z:{z.get('last_update')}:{datetime.utcnow().strftime('%dT%H')}"
+    ent = z['ens'].get(lutte)
+    if ent and ent.get('ver') == ver:
+        return ent['views']
+    if not _sim_lock.acquire(blocking=False):
+        return (ent or {}).get('views')
+    try:
+        ent = z['ens'].get(lutte)
+        if ent and ent.get('ver') == ver:
+            return ent['views']
+        now_dt = datetime.utcnow()
+        active = [h for h in z['latest']['firms']['hotspots']
+                  if _parse_ts(h.get('timestamp'))
+                  and (now_dt - _parse_ts(h['timestamp'])) <= timedelta(hours=ACTIVE_WINDOW_H)]
+        now_key = now_dt.strftime('%Y-%m-%dT%H:00')
+        wf = z.get('wind_field')
+        wfx = None
+        if wf and wf.get('times'):
+            idx = [k for k, t in enumerate(wf['times']) if (t or '') >= now_key]
+            if idx:
+                wfx = {k: (wf[k] if k in ('grid_lats', 'grid_lons')
+                           else [wf['times'][i] for i in idx] if k == 'times'
+                           else (np.asarray(wf[k])[idx] if wf.get(k) is not None else None))
+                       for k in ('grid_lats', 'grid_lons', 'times', 'speed',
+                                 'dir', 'rh', 'temp', 'soil')}
+        wind = [w for w in z['latest']['wind']['hourly_wind']
+                if (w.get('timestamp') or '') >= now_key]
+        lat0, lon0 = z['sim_bbox'][1], z['sim_bbox'][0]
+        lat1, lon1 = z['sim_bbox'][3], z['sim_bbox'][2]
+        store = simulate_ensemble(
+            active, wind, wind_field=wfx, veg_fuel=z.get('veg'),
+            veg_bbox=z['sim_bbox'], max_hours=168,
+            n_runs=int(os.getenv('ZONE_RUNS', '12')),
+            scenario={'supp_level': _LUTTE.get(lutte, 1.0)},
+            smk_bbox=(lat0, lon0, lat1, lon1))
+        if store is None:
+            z['ens'][lutte] = {'ver': ver, 'views': {}}
+            return {}
+        store['smoke_k'] = 1.0
+        views = {}
+        for v in _VIEWS:
+            views[v] = _normalize_ts(derive_view(store, v))
+        z['ens'][lutte] = {'ver': ver, 'views': views, 'store': store}
+        print(f"✓ Ensemble zone {zid} lutte={lutte} prêt")
+        return views
+    finally:
+        _sim_lock.release()
 
 
 def fetch_pyro_watch(lat, lon, hotspots):
@@ -709,9 +990,16 @@ def api_fire_history():
     the active window, and fades them with age (fresh = bright, dying = dark
     red). Much smaller than per-frame point lists.
     """
-    if not latest_data:
+    z = _zone_from_req()
+    if z is not None:
+        if not z.get('ready'):
+            return jsonify({'error': 'Zone loading'}), 503
+        src_data = z['latest']
+    elif latest_data:
+        src_data = latest_data
+    else:
         return jsonify({'error': 'No data available'}), 503
-    hotspots = latest_data['firms'].get('hotspots', [])
+    hotspots = src_data['firms'].get('hotspots', [])
     now = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
     start = now - timedelta(days=5)
     pts = []
@@ -725,7 +1013,7 @@ def api_fire_history():
         pts.append({'lat': h['lat'], 'lon': h['lon'],
                     'frp': round(h.get('frp', 0.0), 1), 'h': round(off, 1)})
     return jsonify({
-        'source': latest_data['firms'].get('source'),
+        'source': src_data['firms'].get('source'),
         'start': start.strftime('%Y-%m-%dT%H:00Z'),
         'now': now.strftime('%Y-%m-%dT%H:00Z'),
         'n_hours': int((now - start).total_seconds() // 3600) + 1,
@@ -833,6 +1121,24 @@ def api_scenario():
     lutte = request.args.get('lutte', 'med')
     if lutte not in _LUTTE:
         lutte = 'med'
+    z = _zone_from_req()
+    if z is not None:
+        if not z.get('ready'):
+            return jsonify({'error': 'Zone loading'}), 503
+        view_z = request.args.get('view', 'ref')
+        if not (view_z in _VIEWS or (view_z.startswith('m') and view_z[1:].isdigit())):
+            view_z = 'ref'
+        views_z = compute_zone_ensemble(z['id'], lutte)
+        data_z = (views_z or {}).get(view_z)
+        if data_z is None and views_z is not None and z['ens'].get(lutte, {}).get('store') is not None:
+            from src.fire_front import derive_view
+            data_z = _normalize_ts(derive_view(z['ens'][lutte]['store'], view_z))
+            views_z[view_z] = data_z
+        if data_z is not None:
+            data_z = dict(data_z)
+            data_z['lutte'] = lutte
+        return (jsonify(data_z if data_z else {'error': 'Computing'}),
+                (200 if data_z else 503))
     ent = _ens_store[lutte]
     views = ent['views'] or compute_ensemble(lutte)
     view = request.args.get('view', 'ref')
@@ -935,9 +1241,16 @@ def api_simulation():
 @app.route('/api/vegetation.png')
 def api_vegetation_png():
     """Fuel map as a translucent PNG overlay (green=forest, blue=water)."""
-    fuel = _veg_cache.get('fuel')
-    if fuel is None:
-        fuel = fetch_vegetation()   # lazy load if the boot fetch failed
+    z = _zone_from_req()
+    if z is not None:
+        fuel = z.get('veg')
+        if fuel is None and z.get('ready'):
+            fuel = fetch_vegetation_bbox(z['sim_bbox'])
+            z['veg'] = fuel
+    else:
+        fuel = _veg_cache.get('fuel')
+        if fuel is None:
+            fuel = fetch_vegetation()   # lazy load if the boot fetch failed
     if fuel is None:
         return jsonify({'error': 'No vegetation'}), 503
     import matplotlib.image as mpimg
@@ -960,15 +1273,17 @@ def api_vegetation_png():
 @app.route('/api/windfield')
 def api_windfield():
     """Spatial wind field (grid of arrows): past 5 days AND forecast hours."""
-    if not _wind_field:
+    z = _zone_from_req()
+    wf = z.get('wind_field') if (z and z.get('ready')) else (_wind_field if z is None else None)
+    if not wf:
         return jsonify({'error': 'No wind field'}), 503
     return jsonify({
-        'grid_lats': _wind_field['grid_lats'],
-        'grid_lons': _wind_field['grid_lons'],
-        'times': _wind_field['times'],
-        'speed': np.asarray(_wind_field['speed']).round(1).tolist(),
-        'dir': np.asarray(_wind_field['dir']).round(0).tolist(),
-        'temp': np.asarray(_wind_field['temp']).round(0).tolist(),
+        'grid_lats': wf['grid_lats'],
+        'grid_lons': wf['grid_lons'],
+        'times': wf['times'],
+        'speed': np.asarray(wf['speed']).round(1).tolist(),
+        'dir': np.asarray(wf['dir']).round(0).tolist(),
+        'temp': np.asarray(wf['temp']).round(0).tolist(),
     })
 
 
@@ -1074,9 +1389,18 @@ def _unused_legacy_index():
 
 @app.route('/api/data')
 def api_data():
-    """JSON API endpoint for real-time data."""
+    """JSON API endpoint for real-time data (zone-aware)."""
+    z = _zone_from_req()
+    if z is not None:
+        if not z.get('ready'):
+            return jsonify({'error': 'Zone loading'}), 503
+        return jsonify(z['latest'])
     if latest_data:
-        return jsonify(latest_data)
+        d = dict(latest_data)
+        d['zone'] = {'id': 'gironde', 'name': 'Gironde',
+                     'view': [[44.33, -1.35], [45.06, -0.45]],
+                     'sim_bbox': list(SIM_BBOX)}
+        return jsonify(d)
     return jsonify({'error': 'No data available'}), 503
 
 # ---------------------------------------------------------------------------
@@ -1289,7 +1613,7 @@ def fetch_meteosat_fire():
         fires = []
         for r, c in zip(rows.tolist(), cols.tolist()):
             lo, la = P(float(x[c]) * H, float(y[r]) * H, inverse=True)
-            if -1.7 <= lo <= -0.3 and 44.15 <= la <= 45.4:
+            if -5.2 <= lo <= 9.8 and 41.2 <= la <= 51.3:
                 fires.append({'lat': round(float(la), 4), 'lon': round(float(lo), 4),
                               'level': int(fr[r, c])})
         end = tstr.split('/')[-1] if tstr else None
@@ -1307,7 +1631,15 @@ def api_meteosat():
     data = _cached('meteosat', 480, fetch_meteosat_fire)
     if data is None:
         return jsonify({'fires': [], 'time': None, 'available': False})
-    return jsonify({**data, 'available': True})
+    z = _zone_from_req()
+    if z is not None:
+        b = z['sim_bbox']   # lon0, lat0, lon1, lat1
+        fires = [f for f in data['fires']
+                 if b[1] <= f['lat'] <= b[3] and b[0] <= f['lon'] <= b[2]]
+    else:
+        fires = [f for f in data['fires']
+                 if 44.15 <= f['lat'] <= 45.4 and -1.7 <= f['lon'] <= -0.3]
+    return jsonify({**data, 'fires': fires, 'available': True})
 
 
 @app.route('/api/air-quality.png')
@@ -1418,7 +1750,13 @@ def fetch_air_field():
 @app.route('/api/air-field')
 def api_air_field():
     """Champ air horaire pour le client (index observé + PM2.5 pour le futur)."""
-    data = _cached('airfield', 1800, fetch_air_field)
+    z = _zone_from_req()
+    if z is not None:
+        if not z.get('ready'):
+            return jsonify({'error': 'Zone loading'}), 503
+        data = z.get('air_field')
+    else:
+        data = _cached('airfield', 1800, fetch_air_field)
     if data is None:
         return jsonify({'error': 'No air field'}), 503
     return jsonify(data)
@@ -1541,9 +1879,27 @@ def methodologie():
 @app.route('/api/communes')
 def api_communes():
     """Simplified commune boundaries (geo.api.gouv.fr) within the view."""
+    z = _zone_from_req()
+    if z is not None:
+        dep = z.get('dep')
+        if dep is None:
+            try:
+                r0 = requests.get('https://geo.api.gouv.fr/communes',
+                                  params={'lat': z['lat'], 'lon': z['lon'],
+                                          'fields': 'codeDepartement'}, timeout=10)
+                dep = (r0.json() or [{}])[0].get('codeDepartement', '33')
+            except Exception:
+                dep = '33'
+            z['dep'] = dep
+        dep_code, zb = dep, z['sim_bbox']
+        bbox_filter = (zb[1] - 0.1, zb[0] - 0.1, zb[3] + 0.1, zb[2] + 0.1)
+        cache_key = f'communes_{dep_code}'
+    else:
+        dep_code, bbox_filter, cache_key = '33', (44.1, -1.9, 45.7, -0.1), 'communes'
+
     def prod():
         r = requests.get('https://geo.api.gouv.fr/communes',
-                         params={'codeDepartement': '33', 'format': 'geojson',
+                         params={'codeDepartement': dep_code, 'format': 'geojson',
                                  'geometry': 'contour'}, timeout=60)
         if r.status_code != 200:
             return None
@@ -1566,7 +1922,8 @@ def api_communes():
                     if dec[0] != dec[-1]:
                         dec.append(dec[0])
                     rings.append(dec)
-                    if any(44.1 <= y <= 45.7 and -1.9 <= x <= -0.1 for x, y in dec[::10]):
+                    la0f, lo0f, la1f, lo1f = bbox_filter
+                    if any(la0f <= y <= la1f and lo0f <= x <= lo1f for x, y in dec[::10]):
                         keep = True
                 if rings:
                     out_polys.append(rings)
@@ -1576,7 +1933,7 @@ def api_communes():
                               'geometry': {'type': 'MultiPolygon',
                                            'coordinates': out_polys}})
         return {'type': 'FeatureCollection', 'features': feats}
-    data = _cached('communes', 7 * 86400, prod)
+    data = _cached(cache_key, 7 * 86400, prod)
     if data is None:
         return jsonify({'type': 'FeatureCollection', 'features': []})
     return jsonify(data)
