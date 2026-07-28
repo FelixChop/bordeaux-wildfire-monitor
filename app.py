@@ -550,10 +550,16 @@ def fetch_vegetation_bbox(bbox):
         return None
 
 
+_air_block_until = 0.0
+
+
 def fetch_air_field_bbox(bbox):
     """Champ air horaire (EAQI+PM2.5) pour une bbox de zone."""
+    global _air_block_until
+    if time.time() < _air_block_until:
+        return None                      # quota API en cours de refroidissement
     lon0, lat0, lon1, lat1 = bbox
-    n_lat, n_lon = 8, 9
+    n_lat, n_lon = 6, 7                  # 42 localisations (quota Open-Meteo)
     lats = np.linspace(lat0, lat1, n_lat)
     lons = np.linspace(lon0, lon1, n_lon)
     laq, loq = [], []
@@ -570,6 +576,10 @@ def fetch_air_field_bbox(bbox):
                 'timezone': 'UTC'}, timeout=40)
             if r.status_code == 200:
                 break
+            if r.status_code == 429:     # rate-limite : on n'insiste PAS
+                _air_block_until = time.time() + 900
+                print("air bbox 429 -> pause 15 min")
+                return None
         except requests.RequestException as e:
             print(f"air bbox fetch essai {att + 1}: {e}")
         time.sleep(4)
@@ -1945,6 +1955,10 @@ def fetch_air_field():
                 'timezone': 'UTC'}, timeout=40)
             if r.status_code == 200:
                 break
+            if r.status_code == 429:     # rate-limite : on n'insiste PAS
+                _air_block_until = time.time() + 900
+                print("air bbox 429 -> pause 15 min")
+                return None
         except requests.RequestException as e:
             print(f"air bbox fetch essai {att + 1}: {e}")
         time.sleep(4)
