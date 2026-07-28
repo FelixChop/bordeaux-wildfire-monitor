@@ -306,6 +306,182 @@ def fetch_air_quality():
         return None
 
 
+# --------------------------------------------------------------------------
+# Mode FRANCE : détection nationale + clustering des incendies actifs
+# --------------------------------------------------------------------------
+FR_BBOX = (-5.2, 41.2, 9.8, 51.3)
+_fr_fires = {'ts': None, 'clusters': []}
+_geo_names = {}   # cache reverse-geocoding
+
+
+def _cluster_name(lat, lon):
+    key = (round(lat, 1), round(lon, 1))
+    if key in _geo_names:
+        return _geo_names[key]
+    name = ''
+    try:
+        r = requests.get('https://api-adresse.data.gouv.fr/reverse/',
+                         params={'lat': lat, 'lon': lon}, timeout=8)
+        feats = r.json().get('features', [])
+        if feats:
+            p = feats[0].get('properties', {})
+            name = p.get('city') or p.get('municipality') or ''
+            ctx = (p.get('context') or '').split(',')
+            if len(ctx) > 1:
+                name = f"{name} ({ctx[1].strip()})" if name else ctx[1].strip()
+    except Exception:
+        pass
+    if not name:
+        # centroïde en pleine forêt : Nominatim (zoom commune) trouve toujours
+        try:
+            time.sleep(1.1)   # politique d'usage Nominatim
+            r = requests.get('https://nominatim.openstreetmap.org/reverse',
+                             params={'lat': lat, 'lon': lon, 'format': 'jsonv2',
+                                     'zoom': 10, 'accept-language': 'fr'},
+                             headers={'User-Agent': 'feux-de-foret.fr (felixrevert@gmail.com)'},
+                             timeout=10)
+            a = r.json().get('address', {})
+            if a.get('country_code') and a['country_code'] != 'fr':
+                _geo_names[key] = None      # hors de France
+                return None
+            name = (a.get('village') or a.get('town') or a.get('city')
+                    or a.get('municipality') or '')
+            dep = a.get('county') or a.get('state_district') or ''
+            if dep:
+                name = f"{name} ({dep})" if name else dep
+        except Exception:
+            pass
+    _geo_names[key] = name
+    return name
+
+
+def fetch_france_fires():
+    """France-wide hotspots (3 days) grouped into fire clusters."""
+    map_key = os.getenv('NASA_FIRMS_MAP_KEY', 'DEMO_KEY')
+    hotspots = []
+    for product in _FIRMS_PRODUCTS:
+        hotspots.extend(_fetch_firms_product(map_key, product, FR_BBOX, days=3))
+    # clustering par buckets 0.22° (~20 km) fusionnés en 8-connexité
+    from collections import defaultdict
+    cell = 0.22
+    buckets = defaultdict(list)
+    for h in hotspots:
+        buckets[(int(h['lat'] / cell), int(h['lon'] / cell))].append(h)
+    seen, clusters = set(), []
+    for key in list(buckets):
+        if key in seen:
+            continue
+        stack, members = [key], []
+        seen.add(key)
+        while stack:
+            k = stack.pop()
+            members.extend(buckets[k])
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    nk = (k[0] + di, k[1] + dj)
+                    if nk in buckets and nk not in seen:
+                        seen.add(nk)
+                        stack.append(nk)
+        clusters.append(members)
+    now = datetime.utcnow()
+    out = []
+    for m in clusters:
+        if len(m) < 3:
+            continue
+        frp24 = n24 = 0
+        last = ''
+        for h in m:
+            dt = _parse_ts(h.get('timestamp'))
+            if dt and (now - dt) <= timedelta(hours=24):
+                frp24 += h.get('frp', 0)
+                n24 += 1
+            if h.get('timestamp') and h['timestamp'] > last:
+                last = h['timestamp']
+        w = [max(h.get('frp', 1), 1) for h in m]
+        sw = sum(w)
+        lat = sum(h['lat'] * wi for h, wi in zip(m, w)) / sw
+        lon = sum(h['lon'] * wi for h, wi in zip(m, w)) / sw
+        out.append({'lat': round(lat, 3), 'lon': round(lon, 3),
+                    'n_total': len(m), 'n_24h': n24,
+                    'frp_24h': round(frp24), 'last_detection': last,
+                    'active': n24 > 0})
+    out.sort(key=lambda c: -c['frp_24h'])
+    kept = []
+    for i, c in enumerate(out):
+        if i < 30:
+            nm = _cluster_name(c['lat'], c['lon'])
+            if nm is None:
+                continue                     # cluster hors de France
+            c['name'] = nm
+        kept.append(c)
+    return {'ts': now.strftime('%Y-%m-%dT%H:00Z'), 'clusters': kept}
+
+
+@app.route('/api/france-air.png')
+def api_france_air_png():
+    """Champ qualité de l'air France entière (EAQI, lissé façon Windy)."""
+    def prod():
+        n_lat, n_lon = 11, 10
+        lat0, lat1, lon0, lon1 = 41.2, 51.3, -5.2, 9.8
+        lats = np.linspace(lat0, lat1, n_lat)
+        lons = np.linspace(lon0, lon1, n_lon)
+        laq, loq = [], []
+        for la in lats:
+            for lo in lons:
+                laq.append(round(float(la), 2))
+                loq.append(round(float(lo), 2))
+        r = requests.get('https://air-quality-api.open-meteo.com/v1/air-quality', params={
+            'latitude': ','.join(map(str, laq)), 'longitude': ','.join(map(str, loq)),
+            'current': 'european_aqi', 'timezone': 'UTC'}, timeout=25)
+        if r.status_code != 200:
+            return None
+        res = r.json()
+        if isinstance(res, dict):
+            res = [res]
+        grid = np.zeros((n_lat, n_lon))
+        for idx, x in enumerate(res[:n_lat * n_lon]):
+            v = x.get('current', {}).get('european_aqi')
+            grid[idx // n_lon, idx % n_lon] = v if v is not None else 0
+        from scipy.interpolate import RegularGridInterpolator
+        from scipy.ndimage import gaussian_filter
+        f = RegularGridInterpolator((lats, lons), grid, method='cubic')
+        fy = np.linspace(lat0, lat1, 300)
+        fx = np.linspace(lon0, lon1, 300)
+        YY, XX = np.meshgrid(fy, fx, indexing='ij')
+        fine = gaussian_filter(f(np.column_stack([YY.ravel(), XX.ravel()])).reshape(300, 300), 2.0)
+        import matplotlib.colors as mcolors
+        cmap = mcolors.LinearSegmentedColormap.from_list('aqi', [
+            (0.00, '#2e7d32'), (0.18, '#8bc34a'), (0.34, '#cddc39'),
+            (0.50, '#ffb300'), (0.66, '#fb8c00'), (0.82, '#e53935'), (1.00, '#8e24aa')])
+        norm = np.clip(fine / 120.0, 0, 1)
+        rgba = cmap(norm)
+        rgba[..., 3] = np.clip(0.15 + norm * 0.55, 0.15, 0.65)
+        import matplotlib.image as mpimg
+        buf = io.BytesIO()
+        mpimg.imsave(buf, np.flipud(rgba), format='png')
+        buf.seek(0)
+        return buf.read()
+    png = _cached('franceair', 1800, prod)
+    if png is None:
+        return jsonify({'error': 'No data'}), 503
+    return Response(png, mimetype='image/png',
+                    headers={'Cache-Control': 'public, max-age=900'})
+
+
+@app.route('/france')
+def france():
+    return render_template('france.html')
+
+
+@app.route('/api/fires')
+def api_fires():
+    """Incendies actifs détectés sur toute la France (clusters)."""
+    data = _cached('france_fires', 3600, fetch_france_fires)
+    if data is None:
+        return jsonify({'clusters': []}), 503
+    return jsonify(data)
+
+
 def fetch_pyro_watch(lat, lon, hotspots):
     """Real-time pyroCumulonimbus watch over the fire zone.
 
@@ -497,7 +673,9 @@ def generate_map_html():
 
 @app.route('/')
 def index():
-    """Main page: responsive Leaflet map + timeline (served from template)."""
+    """Bordeaux map by default; national overview on feux-de-foret.fr."""
+    if 'feux-de-foret' in (request.host or ''):
+        return render_template('france.html')
     return render_template('index.html')
 
 
