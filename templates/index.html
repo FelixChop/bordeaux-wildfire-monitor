@@ -607,10 +607,12 @@ function drawWindAt(ts){
       const s=w.speed[k][a][b], dir=w.dir[k][a][b];
       const t=(w.temp&&w.temp[k])?Math.round(w.temp[k][a][b]):null;
       const rot=(dir+90); // arrow ➤ points east by default; wind blows toward dir+180
-      const size=9+Math.min(s,22)*1.1;          // la TAILLE encode la force
+      const size=7+Math.min(s,22)*0.85;         // la TAILLE encode la force
+      // taille de la température ∝ chaleur (15°C → 7px … 40°C+ → 15px)
+      const tf=t!=null?Math.max(7,Math.min(15,7+(t-15)*0.32)):0;
       const ic=L.divIcon({className:'wind-arrow',iconSize:[size,size+12],
         html:`<div style="transform:rotate(${rot}deg);color:rgba(255,255,255,.78);font-size:${size}px;line-height:${size}px;text-shadow:0 1px 2px #000">➤</div>`+
-             (t!=null?`<div style="font-size:9px;color:#ddd;text-align:center;text-shadow:0 1px 2px #000;opacity:.8;margin-top:1px">${t}°</div>`:'')});
+             (t!=null?`<div style="font-size:${tf.toFixed(1)}px;color:#ddd;text-align:center;text-shadow:0 1px 2px #000;opacity:${t>=30?'0.95':'0.75'};margin-top:1px;${t>=32?'font-weight:700;color:#ffcf9e;':''}">${t}°</div>`:'')});
       L.marker([w.grid_lats[a],w.grid_lons[b]],{icon:ic,interactive:false,keyboard:false}).addTo(windLayer);
     }
   }

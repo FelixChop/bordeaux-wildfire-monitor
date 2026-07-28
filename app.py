@@ -673,6 +673,9 @@ def _zone_refresh(z):
         z['air_field'] = fetch_air_field_bbox(bbox)
         z['last_update'] = datetime.utcnow()
         z['ready'] = True
+        # NDVI en dernier : GIBS peut prendre >1 min, la zone est deja servie
+        if z.get('veg') is None:
+            z['veg'] = fetch_vegetation_bbox(FR_SIM_BBOX)
         print(f"✓ Zone {z['id']} ({z.get('name','')}) prête : {len(hotspots)} foyers")
     except Exception as e:
         print(f"zone refresh {z.get('id')} error: {e}")
@@ -724,7 +727,6 @@ def _refresh_france_zone(fr):
         z['view'] = FRANCE_VIEW
         z['name'] = 'France'
         z['wind_field'] = fetch_wind_field_bbox(FR_SIM_BBOX)
-        z['veg'] = fetch_vegetation_bbox(FR_SIM_BBOX)
         z['air_field'] = fetch_air_field_bbox(FR_SIM_BBOX)
         top = clusters[0] if clusters else None
         z['latest'] = {
@@ -756,6 +758,9 @@ def _refresh_france_zone(fr):
                 for i, t in enumerate(wf['times'])]
         z['last_update'] = datetime.utcnow()
         z['ready'] = True
+        # NDVI en dernier : GIBS peut prendre >1 min, la zone est deja servie
+        if z.get('veg') is None:
+            z['veg'] = fetch_vegetation_bbox(FR_SIM_BBOX)
         print(f"✓ Zone FRANCE prête : {len(hotspots)} foyers, {len(clusters)} incendies")
     except Exception as e:
         print(f"zone france error: {e}")
@@ -829,8 +834,12 @@ def _zone_from_req():
     return _get_zone(zid)
 
 
-def compute_zone_ensemble(zid, lutte='med'):
-    """Ensemble Monte Carlo local d'une zone (à la demande, puis caché)."""
+def compute_zone_ensemble(zid, lutte='med', wait=False):
+    """Ensemble Monte Carlo local d'une zone (à la demande, puis caché).
+
+    wait=True (pipeline de fond) : attend le verrou au lieu de servir
+    l'ancienne version — garantit un résultat frais.
+    """
     z = ZONES.get(zid)
     if not z or not z.get('ready'):
         return None
@@ -840,7 +849,9 @@ def compute_zone_ensemble(zid, lutte='med'):
     if ent and ent.get('ver') == ver:
         return ent['views']
     _lk = _fr_lock if zid == 'france' else _sim_lock
-    if not _lk.acquire(blocking=False):
+    if wait:
+        _lk.acquire()
+    elif not _lk.acquire(blocking=False):
         return (ent or {}).get('views')
     try:
         ent = z['ens'].get(lutte)
@@ -881,7 +892,9 @@ def compute_zone_ensemble(zid, lutte='med'):
         views = {}
         for v in _VIEWS:
             views[v] = _normalize_ts(derive_view(store, v))
-        z['ens'][lutte] = {'ver': ver, 'views': views, 'store': store}
+        prev_hr = (z['ens'].get(lutte) or {}).get('views_hr')
+        z['ens'][lutte] = {'ver': ver, 'views': views, 'store': store,
+                           'views_hr': prev_hr}   # fusion 500 m conservée
         print(f"✓ Ensemble zone {zid} lutte={lutte} prêt")
         return views
     finally:
@@ -981,6 +994,7 @@ def update_data():
             # ---- mode France : zone nationale + ensembles des top incendies ----
             try:
                 fr = fetch_france_fires()
+                _warm_save('france_fires.json', fr)
                 _layer_cache['france_fires'] = (time.time(), fr)
                 _refresh_france_zone(fr)
                 # les ensembles nationaux tournent dans leur propre thread
@@ -1263,22 +1277,19 @@ def api_scenario():
         lutte = 'med'
     z = _zone_from_req()
     if z is not None and z.get('id') == 'france':
+        # LECTURE SEULE : le calcul national vit dans _france_ens_loop ;
+        # on sert toujours la dernière version disponible, jamais de calcul
+        # déclenché par une requête utilisateur.
         view_f = request.args.get('view', 'ref')
         if not (view_f in _VIEWS or (view_f.startswith('m') and view_f[1:].isdigit())):
             view_f = 'ref'
-        if not z.get('ready'):
-            # zone en cours de chargement : servir les vues warm si présentes
-            d0 = ((z.get('ens') or {}).get(lutte) or {}).get('views', {}).get(view_f)
-            if d0:
-                d0 = dict(d0); d0['lutte'] = lutte
-                return jsonify(d0)
-            return jsonify({'error': 'Zone loading'}), 503
-        views_f = compute_zone_ensemble('france', lutte)
-        data_f = (views_f or {}).get(view_f)
-        if data_f is None and views_f is not None and z['ens'].get(lutte, {}).get('store') is not None:
+        ent_f = (z.get('ens') or {}).get(lutte) or {}
+        data_f = ((ent_f.get('views_hr') or {}).get(view_f)
+                  or (ent_f.get('views') or {}).get(view_f))
+        if data_f is None and ent_f.get('store') is not None:
             from src.fire_front import derive_view
-            data_f = _normalize_ts(derive_view(z['ens'][lutte]['store'], view_f))
-            views_f[view_f] = data_f
+            data_f = _normalize_ts(derive_view(ent_f['store'], view_f))
+            ent_f['views'][view_f] = data_f
         if data_f is not None:
             data_f = dict(data_f); data_f['lutte'] = lutte
         return (jsonify(data_f if data_f else {'error': 'Computing'}),
@@ -2177,19 +2188,60 @@ def _france_boot():
             if _w2 and _w2.get('views'):
                 ZONES.setdefault('france', {'id': 'france', 'ready': False, 'ens': {}})
                 ZONES['france']['ens'][_lv] = {'ver': _w2.get('ver'),
-                                               'views': _w2['views']}
+                                               'views': _w2['views'],
+                                               'views_hr': _w2.get('views_hr')}
                 print(f"✓ Warm: ensemble national lutte={_lv}")
         saved = _warm_load('geo_names.json')
         if saved:
             _geo_names.update({tuple(map(float, k.split('|'))): v
                                for k, v in saved.items()})
+        fr0 = _warm_load('france_fires.json')
+        if fr0 and fr0.get('hotspots'):
+            _refresh_france_zone(fr0)      # zone prete en ~5 s (etat precedent)
+            print("✓ Warm: zone France servie depuis le disque")
         fr = fetch_france_fires()
         _warm_save('geo_names.json',
                    {f'{k[0]}|{k[1]}': v for k, v in _geo_names.items()})
+        _warm_save('france_fires.json', fr)
         _layer_cache['france_fires'] = (time.time(), fr)
         _refresh_france_zone(fr)
     except Exception as e:
         print(f"france boot error: {e}")
+
+
+def _merge_hires_views(nat_views, hires):
+    """Remplace, dans chaque frame nationale, les points grossiers situés dans
+    l'emprise d'un feu re-simulé à 500 m par les points fins de ce feu.
+    Stats de surface et fumée restent celles de l'ensemble NATIONAL."""
+    out = {}
+    boxes = [bb for bb, _ in hires]
+
+    def _inside(p):
+        return any(bb[1] <= p[0] <= bb[3] and bb[0] <= p[1] <= bb[2]
+                   for bb in boxes)
+    for vk, nat in nat_views.items():
+        if not nat or not nat.get('frames'):
+            out[vk] = nat
+            continue
+        zvs = [(bb, zv.get(vk)) for bb, zv in hires if zv and zv.get(vk)]
+        if not zvs:
+            out[vk] = nat
+            continue
+        d = dict(nat)
+        frames = []
+        for i, f in enumerate(nat['frames']):
+            f2 = dict(f)
+            pts = [p for p in (f.get('new_points') or []) if not _inside(p)]
+            for bb, zv in zvs:
+                zfs = zv.get('frames') or []
+                if i < len(zfs):
+                    pts.extend(zfs[i].get('new_points') or [])
+            f2['new_points'] = pts
+            frames.append(f2)
+        d['frames'] = frames
+        d['hires_n'] = len(zvs)
+        out[vk] = d
+    return out
 
 
 def _france_ens_loop():
@@ -2199,13 +2251,38 @@ def _france_ens_loop():
     while True:
         try:
             if ZONES.get('france', {}).get('ready'):
+                tops = _france_top_clusters(int(os.getenv('FR_HIRES', '4')))
+                for c in tops:
+                    _get_zone(c['zone'])       # lance les refresh de zone
                 for lv in ('med', 'low', 'high'):
-                    compute_zone_ensemble('france', lv)
+                    compute_zone_ensemble('france', lv, wait=True)
+                    # re-simulation 500 m des principaux feux + fusion
+                    hires = []
+                    for c in tops:
+                        zz = ZONES.get(c['zone'])
+                        for _ in range(45):
+                            if zz and zz.get('ready'):
+                                break
+                            time.sleep(2)
+                            zz = ZONES.get(c['zone'])
+                        if not (zz and zz.get('ready')):
+                            continue
+                        try:
+                            zv = compute_zone_ensemble(c['zone'], lv, wait=True)
+                            if zv:
+                                hires.append((zz['sim_bbox'], zv))
+                        except Exception as e3:
+                            print(f"hires {c['zone']}/{lv} err: {e3}")
                     ent_fr = ZONES['france']['ens'].get(lv)
                     if ent_fr and ent_fr.get('views'):
+                        if hires:
+                            ent_fr['views_hr'] = _merge_hires_views(
+                                ent_fr['views'], hires)
+                            print(f"✓ Fusion hi-res {lv} : {len(hires)} feux à 500 m")
                         _warm_save(f'france_views_{lv}.json',
                                    {'ver': ent_fr['ver'],
-                                    'views': ent_fr['views']})
+                                    'views': ent_fr['views'],
+                                    'views_hr': ent_fr.get('views_hr')})
         except Exception as e:
             print(f"france ens loop err: {e}")
         time.sleep(300)
