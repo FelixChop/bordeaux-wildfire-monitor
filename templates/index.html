@@ -804,8 +804,8 @@ function eaqiPM(p){
   return 160;
 }
 function aqiRGB(v){ // même échelle que le backend (0..120)
-  const stops=[[0,[46,125,50]],[21.6,[139,195,74]],[40.8,[205,220,57]],
-    [60,[255,179,0]],[79.2,[251,140,0]],[98.4,[229,57,53]],[120,[142,36,170]]];
+  const stops=[[0,[80,240,230]],[21.6,[80,204,170]],[40.8,[240,230,65]],
+    [60,[255,155,60]],[79.2,[255,80,80]],[98.4,[150,0,50]],[120,[125,33,129]]];
   const x=Math.max(0,Math.min(v,120));
   for(let i=1;i<stops.length;i++){
     if(x<=stops[i][0]){
@@ -881,7 +881,7 @@ function renderAirAt(f){
   for(let i=0;i<AIRW*AIRH;i++){
     const v=fine[i], [r,g,b]=aqiRGB(v);
     img.data[i*4]=r; img.data[i*4+1]=g; img.data[i*4+2]=b;
-    img.data[i*4+3]=Math.round(255*Math.min(.2+Math.min(v,120)/120*.6,.8));
+    img.data[i*4+3]=Math.round(255*Math.min(.24+Math.min(v,120)/120*.56,.8));
   }
   ctx.putImageData(img,0,0);
   const bctx=airBig.getContext('2d');

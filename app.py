@@ -679,9 +679,16 @@ def fetch_air_field_bbox(bbox):
         a = h.get('european_aqi') or []
         p = h.get('pm2_5') or []
         i, j = idx // n_lon, idx % n_lon
+        last_a, last_p = 0.0, 0.0
         for t in range(T):
-            aqi[t, i, j] = a[t] if t < len(a) and a[t] is not None else 0
-            pm25[t, i, j] = p[t] if t < len(p) and p[t] is not None else 0
+            va = a[t] if t < len(a) else None
+            vp = p[t] if t < len(p) else None
+            if va is not None:
+                last_a = va
+            if vp is not None:
+                last_p = vp
+            aqi[t, i, j] = last_a          # persistance au-dela de l'horizon
+            pm25[t, i, j] = last_p
     return {'times': times, 'bbox': [lat0, lon0, lat1, lon1],
             'aqi': aqi.round(0).tolist(), 'pm25': pm25.round(1).tolist()}
 
@@ -2072,9 +2079,16 @@ def fetch_air_field():
         a = h.get('european_aqi') or []
         p = h.get('pm2_5') or []
         i, j = idx // n_lon, idx % n_lon
+        last_a, last_p = 0.0, 0.0
         for t in range(T):
-            aqi[t, i, j] = a[t] if t < len(a) and a[t] is not None else 0
-            pm25[t, i, j] = p[t] if t < len(p) and p[t] is not None else 0
+            va = a[t] if t < len(a) else None
+            vp = p[t] if t < len(p) else None
+            if va is not None:
+                last_a = va
+            if vp is not None:
+                last_p = vp
+            aqi[t, i, j] = last_a          # persistance au-dela de l'horizon
+            pm25[t, i, j] = last_p
     return {'times': times, 'bbox': [lat0, lon0, lat1, lon1],
             'aqi': aqi.round(0).tolist(), 'pm25': pm25.round(1).tolist()}
 
