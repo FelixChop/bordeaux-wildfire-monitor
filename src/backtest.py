@@ -63,12 +63,13 @@ def _window_loss(hotspots, wf, veg, bbox, t0_idx, horizon_h, params, n_runs=2):
     dom = _prepare_domain(seeds, veg, bbox)
     wfx = _slice_field(wf, t0_idx)
     sc = {'supp_level': 1.0, **params}
-    sims = []
+    sims, late_counts = [], []
     for s in range(n_runs):
         pert = {'rng': np.random.default_rng(1000 + s)}
         ign = _run_once(dom, wfx, None, horizon_h, pert=pert,
                         suppression=True, scenario=sc)[0]
         sims.append((ign >= 0) & ~dom['seed_mask'])
+        late_counts.append(int((ign >= horizon_h - 12).sum()))
     sim_new = sims[int(np.argsort([s.sum() for s in sims])[len(sims) // 2])]
     obs_m = _raster_cells(dom, obs) & ~binary_dilation(dom['seed_mask'],
                                                        np.ones((3, 3), bool))
@@ -76,9 +77,19 @@ def _window_loss(hotspots, wf, veg, bbox, t0_idx, horizon_h, params, n_runs=2):
     a_obs = max(obs_m.sum() * dom['cell_area_ha'], dom['cell_area_ha'])
     sim_dil = binary_dilation(sim_new | dom['seed_mask'], np.ones((5, 5), bool))
     recall = float((obs_m & sim_dil).sum() / max(obs_m.sum(), 1))
-    loss = float(np.log(a_sim / a_obs) ** 2 + 0.7 * (1.0 - recall) ** 2)
+    # ACTIVITE EN FIN DE FENETRE : un feu reel encore actif interdit une
+    # simulation eteinte (et inversement) — anti sur-conservatisme
+    obs_late = [(h['lat'], h['lon']) for h in hotspots
+                if (lambda d: d and t0 + timedelta(hours=horizon_h - 12) < d
+                    <= t0 + timedelta(hours=horizon_h))(_parse(h.get('timestamp')))]
+    o_late = max(_raster_cells(dom, obs_late).sum(), 1)
+    s_late = max(late_counts[int(np.argsort([s.sum() for s in sims])[len(sims) // 2])], 1)
+    act_term = float(np.log(s_late / o_late) ** 2)
+    loss = float(np.log(a_sim / a_obs) ** 2 + 0.7 * (1.0 - recall) ** 2
+                 + 0.6 * act_term)
     return {'loss': loss, 'a_sim': int(a_sim), 'a_obs': int(a_obs),
-            'recall': round(recall, 2)}
+            'recall': round(recall, 2),
+            'act': f'{int(s_late)}c vs {int(o_late)}c'}
 
 
 def backtest_calibrate(hotspots, wind_field, veg, bbox, log=print):
@@ -91,9 +102,9 @@ def backtest_calibrate(hotspots, wind_field, veg, bbox, log=print):
     # fenêtre A : J-4 -> J-2 (croissance) ; fenêtre B : J-2 -> maintenant (déclin)
     windows = [(max(now_idx - 96, 1), 48), (max(now_idx - 48, 1), 48)]
     grid = [{'ros_cal': rc, 'supp_base': sb, 'cont_base': cb}
-            for rc in (0.35, 0.5, 0.65, 0.8)
-            for sb in (0.80, 0.88, 0.95)
-            for cb in (8.0, 14.0, 22.0)]
+            for rc in (0.6, 0.75, 0.9, 1.0)
+            for sb in (0.75, 0.82, 0.90)
+            for cb in (6.0, 10.0, 16.0)]
     results = []
     for k, params in enumerate(grid):
         losses, det = [], []

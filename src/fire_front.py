@@ -335,6 +335,16 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
             _cm = np.sqrt(max(1.0, sc.get('cap_mult', 1.0)))
             cap = (sc.get('cont_base', 4.0) * supp_level * supp_mult * ramp_c
                    * _cm * (555.0 / dom['cell_lat_m']))
+            # rupture de lignes : une cellule tenue, au contact du feu actif
+            # et par vent > 9 m/s, cede avec P=4 %/h (episodes reels)
+            if contained.any():
+                at_risk = (contained
+                           & binary_dilation(burned & ~contained, _ones33)
+                           & (speed > 9.0))
+                if at_risk.any():
+                    rr_b, cc_b = np.where(at_risk)
+                    brk = rng.random(len(rr_b)) < 0.04
+                    contained[rr_b[brk], cc_b[brk]] = False
             n_cont = int(cap) + (1 if rng.random() < (cap % 1.0) else 0)
             if n_cont > 0:
                 edge = burned & ~contained & binary_dilation(~burned & (fuel_grid > 0), _ones33)
