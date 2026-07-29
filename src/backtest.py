@@ -91,9 +91,9 @@ def backtest_calibrate(hotspots, wind_field, veg, bbox, log=print):
     # fenêtre A : J-4 -> J-2 (croissance) ; fenêtre B : J-2 -> maintenant (déclin)
     windows = [(max(now_idx - 96, 1), 48), (max(now_idx - 48, 1), 48)]
     grid = [{'ros_cal': rc, 'supp_base': sb, 'cont_base': cb}
-            for rc in (0.5, 0.7, 0.85, 1.0)
-            for sb in (0.75, 0.85, 0.92)
-            for cb in (4.0, 8.0, 14.0)]
+            for rc in (0.35, 0.5, 0.65, 0.8)
+            for sb in (0.80, 0.88, 0.95)
+            for cb in (8.0, 14.0, 22.0)]
     results = []
     for k, params in enumerate(grid):
         losses, det = [], []
