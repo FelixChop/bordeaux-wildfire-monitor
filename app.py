@@ -950,7 +950,7 @@ def compute_zone_ensemble(zid, lutte='med', wait=False):
     if not z or not z.get('ready'):
         return None
     from src.fire_front import simulate_ensemble, derive_view
-    ver = f"v7z:{z.get('last_update')}:{datetime.utcnow().strftime('%dT%H')}"
+    ver = f"v8z:{z.get('last_update')}:{datetime.utcnow().strftime('%dT%H')}:{_sim_params_stamp()}"
     ent = z['ens'].get(lutte)
     if ent and ent.get('ver') == ver:
         return ent['views']
@@ -990,7 +990,8 @@ def compute_zone_ensemble(zid, lutte='med', wait=False):
             n_runs=int(os.getenv('FR_RUNS', '8')) if is_fr else int(os.getenv('ZONE_RUNS', '12')),
             scenario={'supp_level': _LUTTE.get(lutte, 1.0),
                       'cap_mult': float(np.clip(n_fires, 1, 15) ** 1.5),
-                      'pyro_mult': 0.5 if is_fr else 1.0},
+                      'pyro_mult': 0.5 if is_fr else 1.0,
+                      **_sim_params()},
             smk_bbox=(lat0, lon0, lat1, lon1))
         if store is None:
             z['ens'][lutte] = {'ver': ver, 'views': {}}
@@ -1311,6 +1312,17 @@ def api_fire_history():
 
 
 _sim_cache = {'key': None, 'data': None}
+def _sim_params():
+    """Paramètres de propagation calibrés par backtest (persistés)."""
+    saved = _warm_load('sim_params.json') or {}
+    return saved.get('params') or {}
+
+
+def _sim_params_stamp():
+    saved = _warm_load('sim_params.json') or {}
+    return saved.get('date', 'none')
+
+
 _sim_lock = __import__('threading').Lock()
 _fr_lock = __import__('threading').Lock()   # ensembles nationaux, independants
 
@@ -1367,7 +1379,7 @@ def compute_ensemble(lutte='med'):
         return None
     from src.fire_front import simulate_ensemble, derive_view
     ent = _ens_store[lutte]
-    ver = f"v7:{last_update}:{datetime.utcnow().strftime('%dT%H')}"
+    ver = f"v8:{last_update}:{datetime.utcnow().strftime('%dT%H')}:{_sim_params_stamp()}"
     if ent['ver'] == ver:
         return ent['views']
     if not _sim_lock.acquire(blocking=False):
@@ -1379,7 +1391,7 @@ def compute_ensemble(lutte='med'):
         store = simulate_ensemble(
             hotspots, wind, wind_field=wf, veg_fuel=fuel, veg_bbox=SIM_BBOX,
             max_hours=168, n_runs=int(os.getenv('ENS_RUNS', '16')),
-            scenario={'supp_level': _LUTTE[lutte]})
+            scenario={'supp_level': _LUTTE[lutte], **_sim_params()})
         store['smoke_k'] = calibrate_smoke_k()   # ancré sur le panache RÉEL
         views = {}
         for v in _VIEWS:
@@ -2406,6 +2418,31 @@ def _france_ens_loop():
     time.sleep(45)
     while True:
         try:
+            # BACKTEST quotidien : calibre ros_cal/supp_base/cont_base sur les
+            # 96 dernieres heures REELLES (fenetre croissance + fenetre declin)
+            saved_bt = _warm_load('sim_params.json') or {}
+            today = datetime.utcnow().strftime('%Y-%m-%d')
+            if (saved_bt.get('date') != today
+                    and (not saved_bt or datetime.utcnow().hour >= 3)
+                    and latest_data and _wind_field is not None):
+                try:
+                    from src.backtest import backtest_calibrate
+                    fuel_bt = _veg_cache.get('fuel')
+                    hs_bt = (latest_data.get('firms') or {}).get('hotspots') or []
+                    if fuel_bt is not None and len(hs_bt) > 50:
+                        print("⚙ Backtest de calibration…")
+                        best = backtest_calibrate(hs_bt, _wind_field,
+                                                  fuel_bt, SIM_BBOX)
+                        if best:
+                            _warm_save('sim_params.json',
+                                       {'params': best['params'],
+                                        'loss': best['loss'],
+                                        'windows': best['windows'],
+                                        'date': today})
+                            print(f"✓ Params calibrés : {best['params']} "
+                                  f"(loss {best['loss']:.3f})")
+                except Exception as ebt:
+                    print(f"backtest err: {ebt}")
             if ZONES.get('france', {}).get('ready'):
                 tops = _france_top_clusters(int(os.getenv('FR_HIRES', '6')))
                 for c in tops:

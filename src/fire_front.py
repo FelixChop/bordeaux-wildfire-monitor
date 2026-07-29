@@ -121,7 +121,8 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
     speed_mult = p.get('speed_mult', 1.0) * sc.get('speed_mult_g', 1.0)
     rh_off = p.get('rh_off', 0.0)
     temp_off = p.get('temp_off', 0.0) + sc.get('temp_off_g', 0.0)
-    cal_mult = p.get('cal_mult', 1.0) * sc.get('pyro_cal', 1.0)
+    cal_mult = (p.get('cal_mult', 1.0) * sc.get('pyro_cal', 1.0)
+                * sc.get('ros_cal', 1.0))   # calibration backtest
     supp_mult = p.get('supp_mult', 1.0)
     supp_base = sc.get('supp_base', 0.75)
     soil_off = sc.get('soil_off_g', 0.0)
@@ -332,8 +333,8 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
             # decroissants (sqrt) ; 555/cell_lat_m rend la capacite (km de
             # ligne/h) invariante a la resolution du raster (calibree a 500 m)
             _cm = np.sqrt(max(1.0, sc.get('cap_mult', 1.0)))
-            cap = (4.0 * supp_level * supp_mult * ramp_c * _cm
-                   * (555.0 / dom['cell_lat_m']))
+            cap = (sc.get('cont_base', 4.0) * supp_level * supp_mult * ramp_c
+                   * _cm * (555.0 / dom['cell_lat_m']))
             n_cont = int(cap) + (1 if rng.random() < (cap % 1.0) else 0)
             if n_cont > 0:
                 edge = burned & ~contained & binary_dilation(~burned & (fuel_grid > 0), _ones33)
