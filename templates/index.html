@@ -682,9 +682,14 @@ function renderPastFrame(f,i){
   // ⚡ PAROXYSME : orage de feu probable à cet instant du passé
   const parox=state.parox&&state.parox.has(h);
   if(parox){
+    // l'orage se forme AU-DESSUS du feu le plus intense (pas au centroïde
+    // global qui tombe entre deux feux distincts)
+    const rec=(state.firePts||[]).filter(p=>{const g=h-p.h;return g>=0&&g<4;});
+    let best=null; rec.forEach(p=>{if(!best||(p.frp||1)>(best.frp||1))best=p;});
     let sla=0,slo=0,sw=0;
-    (state.firePts||[]).forEach(p=>{const g=h-p.h;
-      if(g>=0&&g<4){const w=(p.frp||1);sla+=p.lat*w;slo+=p.lon*w;sw+=w;}});
+    if(best) rec.forEach(p=>{
+      if(Math.abs(p.lat-best.lat)<0.15&&Math.abs(p.lon-best.lon)<0.15){
+        const w=(p.frp||1);sla+=p.lat*w;slo+=p.lon*w;sw+=w;}});
     if(sw>0){
       const cla=sla/sw, clo=slo/sw;
       const jit=x=>((h*9301+x*49297)%233280)/233280-0.5;   // pseudo-aléa stable par heure
