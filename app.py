@@ -836,6 +836,24 @@ def _refresh_france_zone(fr):
         z['wind_field'] = fetch_wind_field_bbox(FR_SIM_BBOX) or z.get('wind_field')
         af_new = fetch_air_field_bbox(FR_SIM_BBOX)
         if af_new is not None:
+            try:
+                sens = fetch_air_sensors_fallback()
+                if sens:
+                    now_k = datetime.utcnow().strftime('%Y-%m-%dT%H:00')
+                    times_af = af_new['times']
+                    kk = next((i for i, t in enumerate(times_af)
+                               if t >= now_k), len(times_af) - 1)
+                    A = np.asarray(af_new['aqi'][kk])
+                    P = np.asarray(af_new['pm25'][kk])
+                    As = np.asarray(sens['aqi'][0])
+                    Ps = np.asarray(sens['pm25'][0])
+                    af_new['aqi'][kk] = np.maximum(A, As).round(0).tolist()
+                    af_new['pm25'][kk] = np.maximum(P, Ps).round(1).tolist()
+                    af_new['assim'] = now_k
+                    print(f"✓ Assimilation capteurs : max PM2.5 mesure "
+                          f"{float(Ps.max()):.0f} vs CAMS {float(P.max()):.0f} µg")
+            except Exception as e_as:
+                print(f"assimilation capteurs err: {e_as}")
             z['air_field'] = af_new
             _warm_save('france_air.json', af_new)
         elif z.get('air_field') is None:
