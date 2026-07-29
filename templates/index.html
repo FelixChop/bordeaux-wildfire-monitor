@@ -220,16 +220,14 @@
       <h3>🎛️ Scénarios de simulation <span class="mh-sub">(ensemble de 16 tirages)</span></h3>
       <div class="views" id="views" style="grid-template-columns:1fr 1fr 1fr">
         <b data-v="ref" class="on">🎯 Référence</b>
+        <b data-v="opt">🍀 Optimiste</b>
         <b data-v="pess">⚠️ Pessimiste</b>
-        <b data-v="pyro">🌩️ Orage de feu</b>
       </div>
       <div class="dash-note" style="margin-top:2px">
-        🎯 l'évolution la plus probable · ⚠️ si la météo tourne mal (pire tirage sur 10) ·
-        🌩️ scénarios où le feu produit des <b>épisodes</b> d'orage de feu (pyrocumulonimbus). Un pyroCb
-        est un orage créé par la colonne de fumée : il dure quelques heures puis s'effondre, et se
-        reforme tant que le feu est assez intense — l'état <b>temps réel</b> est affiché dans
-        « Situation ». Probabilité d'épisodes sur les 7 prochains jours simulés :
-        <b id="pyroProba">—</b> (liée à l'intensité du feu simulé).
+        🎯 l'évolution la plus probable · 🍀 si la météo aide (meilleur tirage sur 10) ·
+        ⚠️ si la météo tourne mal (pire tirage sur 10). Probabilité d'épisodes
+        d'orage de feu (pyrocumulonimbus) sur les 7 jours simulés :
+        <b id="pyroProba">—</b> — l'état temps réel est dans « Situation ».
       </div>
       <div class="views" style="grid-template-columns:1fr">
         <b onclick="randomMember()" id="randBtn">🎲 Tirage aléatoire (1 des 12 simulations)</b>
