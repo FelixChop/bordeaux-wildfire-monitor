@@ -840,7 +840,28 @@ function renderAirAt(f){
   const basePm=(af.pm25||[])[kk];                         // PM2.5 CAMS
   const [la0,lo0,la1,lo1]=af.bbox;
   const nl=base.length, nc=base[0].length;
-  const isSim=(f.kind==='sim'&&f.smoke);
+  // panache : simulé (frames futures) OU réanalyse du panache RÉEL (passé,
+  // détections satellites + vents observés, émissions calibrées CAMS)
+  let smokeGrid=null, smokeBB=null;
+  if(f.kind==='sim'&&f.smoke){
+    smokeGrid=f.smoke;
+    smokeBB=(state.sim&&state.sim.smoke_bbox)||af.bbox;
+  }else if(af.smoke_past&&af.smoke_past.frames){
+    const sp=af.smoke_past;
+    if(!sp._t0i){sp._t0i={};af.times.forEach((t,q)=>{sp._t0i[t.slice(0,13)]=q;});sp._cache={};}
+    const q=sp._t0i[(f.timestamp||'').slice(0,13)];
+    const fr=q!=null?sp.frames[String(q)]:null;
+    if(fr){
+      if(!sp._cache[q]){
+        const [nr,nc]=sp.shape;
+        const g=Array.from({length:nr},()=>new Array(nc).fill(0));
+        fr.forEach(([r,c,v])=>{g[r][c]=v;});
+        sp._cache[q]=g;
+      }
+      smokeGrid=sp._cache[q]; smokeBB=sp.bbox;
+    }
+  }
+  const isSim=!!smokeGrid;
   // grille fine bilinéaire (indice + PM2.5 si simulation)
   const fine=new Float32Array(AIRW*AIRH);
   const pmF=isSim?new Float32Array(AIRW*AIRH):null;
@@ -860,8 +881,8 @@ function renderAirAt(f){
   // panache du feu SIMULÉ : nappe de fumée transportée (advection+accumulation,
   // calculée côté serveur) — même logique qu'un modèle de dispersion
   if(isSim&&pmF){
-    const sm=f.smoke, snr=sm.length, snc=sm[0].length;
-    const sb=(state.sim&&state.sim.smoke_bbox)||af.bbox;
+    const sm=smokeGrid, snr=sm.length, snc=sm[0].length;
+    const sb=smokeBB;
     const[sla0,slo0,sla1,slo1]=sb;
     for(let y=0;y<AIRH;y++){
       const la=la1-(y/(AIRH-1))*(la1-la0);

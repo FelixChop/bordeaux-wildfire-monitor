@@ -783,6 +783,7 @@ def _zone_refresh(z):
         # NDVI en dernier : GIBS peut prendre >1 min, la fiche est deja servie
         if z.get('veg') is None:
             z['veg'] = fetch_vegetation_bbox(bbox)
+        z['smoke_past'] = _smoke_past_zone(z)
         print(f"✓ Zone {z['id']} ({z.get('name','')}) prête : {len(hotspots)} foyers")
     except Exception as e:
         print(f"zone refresh {z.get('id')} error: {e}")
@@ -887,6 +888,7 @@ def _refresh_france_zone(fr):
                  'relative_humidity_pct': float(rh[i]),
                  'temperature_c': float(tp[i])}
                 for i, t in enumerate(wf['times'])]
+        z['smoke_past'] = _smoke_past_zone(z)
         z['last_update'] = datetime.utcnow()
         z['ready'] = True
         # NDVI en dernier : GIBS peut prendre >1 min, la zone est deja servie
@@ -2123,7 +2125,112 @@ def api_air_field():
         data = _cached('airfield', 1800, fetch_air_field)
     if data is None:
         return jsonify({'error': 'No air field'}), 503
-    return jsonify(data)
+    out = dict(data)
+    if z is not None:
+        sp = z.get('smoke_past')
+        if sp:
+            out['smoke_past'] = sp
+    else:
+        sp = _cached('smoke_past_gironde', 1800, _smoke_past_gironde)
+        if sp:
+            out['smoke_past'] = sp
+    return jsonify(out)
+
+
+def _sparse_smoke(pred, n_past, times_af, bbox, shape):
+    """Encode la reanalyse {h: grille} en frames eparses pour le client."""
+    frames = {}
+    for h in range(n_past):
+        g = pred.get(h)
+        if g is None:
+            continue
+        arr = np.asarray(g)
+        rr, cc = np.where(arr >= 3)
+        if len(rr):
+            frames[str(h)] = [[int(r), int(c), int(arr[r, c])]
+                              for r, c in zip(rr, cc)]
+    return {'t0': times_af[0], 'shape': list(shape),
+            'bbox': list(bbox), 'frames': frames}
+
+
+def _smoke_past_gironde():
+    """Reanalyse du panache REEL (detections FIRMS + vents observes,
+    emissions calibrees) pour l'affichage des heures passees."""
+    try:
+        from src.fire_front import hindcast_smoke, _SMK_BBOX, _SMK_NR, _SMK_NC
+        af = _cached('airfield', 1800, fetch_air_field)
+        if not af or not latest_data or _wind_field is None:
+            return None
+        times_af = af['times']
+        now_key = datetime.utcnow().strftime('%Y-%m-%dT%H:00')
+        n_past = sum(1 for t in times_af if t < now_key)
+        if n_past < 10:
+            return None
+        t0 = datetime.strptime(times_af[0], '%Y-%m-%dT%H:%M')
+        la0, lo0, la1, lo1 = _SMK_BBOX
+        offs = []
+        for hsp in latest_data['firms'].get('hotspots', []):
+            dt = _parse_ts(hsp.get('timestamp'))
+            if not dt:
+                continue
+            h0 = int((dt - t0).total_seconds() // 3600)
+            if not (0 <= h0 < n_past):
+                continue
+            rr = round((la1 - hsp['lat']) / (la1 - la0) * (_SMK_NR - 1))
+            cc = round((hsp['lon'] - lo0) / (lo1 - lo0) * (_SMK_NC - 1))
+            if 0 <= rr < _SMK_NR and 0 <= cc < _SMK_NC:
+                offs.append((rr, cc, h0))
+        if len(offs) < 20:
+            return None
+        k = calibrate_smoke_k()
+        pred = hindcast_smoke(offs, _wind_field, n_past,
+                              set(range(n_past)), k_cal=k)
+        return _sparse_smoke(pred, n_past, times_af,
+                             [la0, lo0, la1, lo1], (_SMK_NR, _SMK_NC))
+    except Exception as e:
+        print(f"smoke past gironde err: {e}")
+        return None
+
+
+def _smoke_past_zone(z):
+    """Meme reanalyse pour une zone (France incluse) sur sa grille fumee."""
+    try:
+        from src.fire_front import hindcast_smoke, _SMK_NR, _SMK_NC
+        af = z.get('air_field')
+        wf = z.get('wind_field')
+        hs = ((z.get('latest') or {}).get('firms') or {}).get('hotspots') or []
+        if not af or not wf or len(hs) < 20:
+            return None
+        times_af = af['times']
+        now_key = datetime.utcnow().strftime('%Y-%m-%dT%H:00')
+        n_past = sum(1 for t in times_af if t < now_key)
+        if n_past < 10:
+            return None
+        t0 = datetime.strptime(times_af[0], '%Y-%m-%dT%H:%M')
+        lon0, lat0, lon1, lat1 = z['sim_bbox']
+        la0, lo0, la1, lo1 = lat0, lon0, lat1, lon1
+        offs = []
+        for hsp in hs:
+            dt = _parse_ts(hsp.get('timestamp'))
+            if not dt:
+                continue
+            h0 = int((dt - t0).total_seconds() // 3600)
+            if not (0 <= h0 < n_past):
+                continue
+            rr = round((la1 - hsp['lat']) / (la1 - la0) * (_SMK_NR - 1))
+            cc = round((hsp['lon'] - lo0) / (lo1 - lo0) * (_SMK_NC - 1))
+            if 0 <= rr < _SMK_NR and 0 <= cc < _SMK_NC:
+                offs.append((rr, cc, h0))
+        if len(offs) < 20:
+            return None
+        k = calibrate_smoke_k()
+        pred = hindcast_smoke(offs, wf, n_past, set(range(n_past)),
+                              k_cal=k, smk_bbox=(la0, lo0, la1, lo1))
+        return _sparse_smoke(pred, n_past, times_af,
+                             [la0, lo0, la1, lo1], (_SMK_NR, _SMK_NC))
+    except Exception as e:
+        print(f"smoke past zone err: {e}")
+        return None
 
 
 def calibrate_smoke_k():
