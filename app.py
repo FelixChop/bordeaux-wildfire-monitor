@@ -571,6 +571,18 @@ def _attach_scores(clusters):
     return clusters
 
 
+@app.route('/api/jslog', methods=['POST'])
+def api_jslog():
+    """Les erreurs JS des clients remontent ici (diagnostic mobile)."""
+    try:
+        msg = (request.get_data(as_text=True) or '')[:600]
+        ua = (request.headers.get('User-Agent') or '')[:80]
+        print(f"⚠ JSERR [{ua}] {msg}")
+    except Exception:
+        pass
+    return '', 204
+
+
 @app.route('/api/fires')
 def api_fires():
     """Incendies actifs détectés sur toute la France (clusters)."""
@@ -2789,6 +2801,14 @@ def _france_ens_loop():
                     # re-simulation 500 m des principaux feux + fusion
                     hires = []
                     for c in tops:
+                        # le feu girondin utilise l'ensemble OFFICIEL de la
+                        # fiche incendiebordeaux.fr (16 tirages, fumee
+                        # calibree) — pas une re-simulation de zone
+                        if 44.0 <= c['lat'] <= 45.4 and -1.6 <= c['lon'] <= -0.2:
+                            gv = _ens_store.get(lv, {}).get('views') or {}
+                            if gv:
+                                hires.append((list(SIM_BBOX), gv))
+                            continue
                         zz = ZONES.get(c['zone'])
                         for _ in range(45):
                             if zz and zz.get('ready'):
