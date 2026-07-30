@@ -60,7 +60,10 @@ def _window_loss(hotspots, wf, veg, bbox, t0_idx, horizon_h, params, n_runs=2):
               (_parse(h.get('timestamp')))]
     if len(seeds) < 5 or len(obs) < 3:
         return None
-    dom = _prepare_domain(seeds, veg, bbox)
+    burned_prev = [(h['lat'], h['lon']) for h in hotspots
+                   if (lambda d: d and d < t0 - timedelta(hours=24))
+                   (_parse(h.get('timestamp')))]
+    dom = _prepare_domain(seeds, veg, bbox, burned_pts=burned_prev)
     wfx = _slice_field(wf, t0_idx)
     sc = {'supp_level': 1.0, **params}
     sims, late_counts = [], []

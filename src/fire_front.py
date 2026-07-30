@@ -59,7 +59,7 @@ def _shift(mask, di, dj):
 
 
 def _prepare_domain(hotspots, veg_fuel, veg_bbox, cell_deg=0.005,
-                    max_cells=360_000):
+                    max_cells=360_000, burned_pts=None):
     seeds = [(h['lat'], h['lon']) for h in hotspots if 'lat' in h and 'lon' in h]
     if not seeds:
         return None
@@ -97,6 +97,20 @@ def _prepare_domain(hotspots, veg_fuel, veg_bbox, cell_deg=0.005,
     ri = np.clip(((lats - lat_min) / cell_deg).astype(int), 0, nrows - 1)
     ci = np.clip(((lons - lon_min) / cell_deg).astype(int), 0, ncols - 1)
     seed_mask[ri, ci] = True
+
+    # Cicatrices REELLES : le NDVI (composite 8 j) montre encore vert ce qui
+    # a brule — on retire le combustible des cellules deja parcourues par le
+    # feu (detections passees), le front ne peut plus re-bruler le brule.
+    if burned_pts:
+        from scipy.ndimage import binary_dilation as _bd
+        scar = np.zeros((nrows, ncols), dtype=bool)
+        for bla, blo in burned_pts:
+            r = int((bla - lat_min) / cell_deg)
+            c = int((blo - lon_min) / cell_deg)
+            if 0 <= r < nrows and 0 <= c < ncols:
+                scar[r, c] = True
+        scar = _bd(scar, np.ones((3, 3), bool))
+        fuel_grid = np.where(scar & ~seed_mask, fuel_grid * 0.06, fuel_grid)
 
     nbr = []
     for di, dj in _NEIGHBOURS:
@@ -495,10 +509,11 @@ def simulate_monte_carlo(hotspots, wind_records, wind_field=None, veg_fuel=None,
 
 def simulate_ensemble(hotspots, wind_records, wind_field=None, veg_fuel=None,
                       veg_bbox=None, max_hours=168, n_runs=12, rng_seed=0,
-                      pyro_daily_p=0.07, scenario=None, smk_bbox=None):
+                      pyro_daily_p=0.07, scenario=None, smk_bbox=None,
+                      burned_pts=None):
     if binary_dilation is None:
         return None
-    dom = _prepare_domain(hotspots, veg_fuel, veg_bbox)
+    dom = _prepare_domain(hotspots, veg_fuel, veg_bbox, burned_pts=burned_pts)
     if dom is None:
         return None
     from scipy.ndimage import gaussian_filter as _gf

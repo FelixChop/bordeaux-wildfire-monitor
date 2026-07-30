@@ -1160,9 +1160,13 @@ def compute_zone_ensemble(zid, lutte='med', wait=False):
         lat1, lon1 = z['sim_bbox'][3], z['sim_bbox'][2]
         is_fr = (zid == 'france')
         n_fires = len([c for c in (z['latest'].get('clusters') or []) if c.get('active')]) if is_fr else 1
+        cutoff_b = now_dt - timedelta(hours=ACTIVE_WINDOW_H)
+        burned_prev = [(h['lat'], h['lon'])
+                       for h in z['latest']['firms']['hotspots']
+                       if (_parse_ts(h.get('timestamp')) or now_dt) < cutoff_b]
         store = simulate_ensemble(
             active, wind, wind_field=wfx, veg_fuel=z.get('veg'),
-            veg_bbox=z['sim_bbox'], max_hours=168,
+            veg_bbox=z['sim_bbox'], max_hours=168, burned_pts=burned_prev,
             n_runs=int(os.getenv('FR_RUNS', '8')) if is_fr else int(os.getenv('ZONE_RUNS', '12')),
             scenario={'supp_level': _LUTTE.get(lutte, 1.0),
                       'cap_mult': float(np.clip(n_fires, 1, 15) ** 1.5),
@@ -1595,9 +1599,15 @@ def compute_ensemble(lutte='med'):
         if ent['ver'] == ver:
             return ent['views']
         hotspots, wind, wf, fuel, _ = _sim_inputs()
+        _now_g = datetime.utcnow()
+        burned_g = [(h['lat'], h['lon'])
+                    for h in (latest_data or {}).get('firms', {}).get('hotspots', [])
+                    if (_parse_ts(h.get('timestamp')) or _now_g)
+                    < _now_g - timedelta(hours=ACTIVE_WINDOW_H)]
         store = simulate_ensemble(
             hotspots, wind, wind_field=wf, veg_fuel=fuel, veg_bbox=SIM_BBOX,
             max_hours=168, n_runs=int(os.getenv('ENS_RUNS', '16')),
+            burned_pts=burned_g,
             scenario={'supp_level': _LUTTE[lutte], **_sim_params()})
         store['smoke_k'] = calibrate_smoke_k()   # ancré sur le panache RÉEL
         views = {}
