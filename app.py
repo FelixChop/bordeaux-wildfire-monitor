@@ -257,7 +257,7 @@ SIM_BBOX = (-1.8, 44.2, -0.2, 45.6)  # lon_min, lat_min, lon_max, lat_max (large
 _veg_cache = {'date': None, 'fuel': None, 'bbox': SIM_BBOX}
 
 
-def fetch_wind_field(n=6, hours=312):  # 5 past days + 8 forecast days
+def fetch_wind_field(n=6, hours=432):  # 10 j passes + 8 j de prevision
     """Grid of Open-Meteo wind+humidity forecasts for a spatial wind field."""
     lon0, lat0, lon1, lat1 = SIM_BBOX
     grid_lats = list(np.linspace(lat0, lat1, n))
