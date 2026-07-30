@@ -337,6 +337,25 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
                             burned[rr, cc] = True
                             ign[rr, cc] = h
 
+        # --- Nouveaux departs (ignitions humaines/foudre) -------------------
+        # La France reelle allume 10-30 feux/jour : sans eux, toute prevision
+        # nationale s'eteint. Tirage quotidien Poisson(sc['ignition_rate']),
+        # place la ou le risque est maximal (conditions du moment x fuel).
+        if rng is not None and h % 24 == 14 and sc.get('ignition_rate', 0) > 0:
+            n_new = int(rng.poisson(float(sc['ignition_rate'])))
+            if n_new > 0:
+                risk = _ros_grid(speed, rh, fuel_grid, temp, 1.0, soil) \
+                    * (fuel_grid > 0.25) * (~burned)
+                flat = risk.ravel()
+                tot = flat.sum()
+                if tot > 0:
+                    picks = rng.choice(flat.size, size=n_new, replace=False,
+                                       p=flat / tot)
+                    for pk in picks.tolist():
+                        rr3, cc3 = pk // ncols, pk % ncols
+                        burned[rr3, cc3] = True
+                        ign[rr3, cc3] = h
+
         # --- Reprises de braises --------------------------------------------
         # Un sol brule garde des braises ~3 jours : par vent >6 m/s, une
         # cellule refroidie au contact de combustible intact peut repartir

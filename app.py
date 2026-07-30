@@ -1160,6 +1160,12 @@ def compute_zone_ensemble(zid, lutte='med', wait=False):
         lat1, lon1 = z['sim_bbox'][3], z['sim_bbox'][2]
         is_fr = (zid == 'france')
         n_fires = len([c for c in (z['latest'].get('clusters') or []) if c.get('active')]) if is_fr else 1
+        ign_rate = 0.0
+        if is_fr:
+            cutoff48 = (now_dt - timedelta(hours=48)).strftime('%Y-%m-%dT%H')
+            n_new48 = len([c for c in (z['latest'].get('clusters') or [])
+                           if (c.get('first_detection') or '') >= cutoff48])
+            ign_rate = float(np.clip(n_new48 / 2.0, 4, 30))
         cutoff_b = now_dt - timedelta(hours=ACTIVE_WINDOW_H)
         burned_prev = [(h['lat'], h['lon'])
                        for h in z['latest']['firms']['hotspots']
@@ -1171,6 +1177,7 @@ def compute_zone_ensemble(zid, lutte='med', wait=False):
             scenario={'supp_level': _LUTTE.get(lutte, 1.0),
                       'cap_mult': float(np.clip(n_fires, 1, 15) ** 1.5),
                       'pyro_mult': 0.5 if is_fr else 1.0,
+                      'ignition_rate': ign_rate,
                       **_sim_params()},
             smk_bbox=(lat0, lon0, lat1, lon1))
         if store is None:
