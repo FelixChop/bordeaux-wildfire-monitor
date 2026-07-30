@@ -80,8 +80,40 @@ FIRE_T0 = datetime(2026, 7, 22)
 
 
 def _firms_days():
-    """Nb de jours a demander a FIRMS pour couvrir depuis FIRE_T0 (max API 10)."""
-    return int(np.clip((datetime.utcnow() - FIRE_T0).days + 1, 5, 10))
+    """Fenetre FIRMS : l'API NRT accepte AU MAX 5 jours par requete.
+    L'historique anterieur vient des archives disque + backfill par date."""
+    return 5
+
+
+_backfilled = set()
+
+
+def _backfill_archive(name, bbox):
+    """Recupere une fois les detections depuis FIRE_T0 (tranches de 5 j
+    avec date de depart) pour ancrer l'historique au debut de l'incendie."""
+    if name in _backfilled:
+        return []
+    _backfilled.add(name)
+    arch = _warm_load(name) or []
+    t0s = FIRE_T0.strftime('%Y-%m-%d')
+    have_start = min((h.get('timestamp') or '9') for h in arch) if arch else '9'
+    if have_start <= t0s + 'T23':
+        return []          # l'archive couvre deja le debut
+    map_key = os.getenv('NASA_FIRMS_MAP_KEY', 'DEMO_KEY')
+    got = []
+    t = FIRE_T0
+    while t < datetime.utcnow() - timedelta(days=4):
+        ds = t.strftime('%Y-%m-%d')
+        for product in _FIRMS_PRODUCTS:
+            try:
+                got.extend(_fetch_firms_product(map_key, product, bbox,
+                                                days=5, date=ds))
+            except Exception as e:
+                print(f"backfill {product} {ds} err: {e}")
+        t += timedelta(days=5)
+    if got:
+        print(f"✓ Backfill {name} : {len(got)} detections depuis {t0s}")
+    return got
 
 
 def _merge_archive(name, hotspots):
@@ -103,12 +135,14 @@ def _merge_archive(name, hotspots):
     return arch
 
 
-def _fetch_firms_product(map_key, product, bbox, days=None):
+def _fetch_firms_product(map_key, product, bbox, days=None, date=None):
+    """Fetch one FIRMS product; return list of hotspot dicts.
+    date='YYYY-MM-DD' (optionnel) = jour de DEPART de la fenetre (backfill)."""
     if days is None:
         days = _firms_days()
-    """Fetch one FIRMS product; return list of hotspot dicts."""
     url = (f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{map_key}/"
-           f"{product}/{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}/{days}")
+           f"{product}/{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}/{days}"
+           + (f"/{date}" if date else ''))
     out = []
     try:
         r = requests.get(url, timeout=15)
@@ -143,7 +177,9 @@ def fetch_nasa_firms():
     hotspots = []
     for product in _FIRMS_PRODUCTS:
         hotspots.extend(_fetch_firms_product(map_key, product, bbox))
-    hotspots = _merge_archive('fire_archive_gironde.json', hotspots)
+    hotspots = _merge_archive('fire_archive_gironde.json',
+                              hotspots + _backfill_archive(
+                                  'fire_archive_gironde.json', bbox))
 
     if hotspots:
         last_ts = max((h['timestamp'] for h in hotspots), default=None)
@@ -396,7 +432,9 @@ def fetch_france_fires():
     hotspots = []
     for product in _FIRMS_PRODUCTS:
         hotspots.extend(_fetch_firms_product(map_key, product, FR_BBOX))
-    hotspots = _merge_archive('fire_archive_france.json', hotspots)
+    hotspots = _merge_archive('fire_archive_france.json',
+                              hotspots + _backfill_archive(
+                                  'fire_archive_france.json', FR_BBOX))
     # clustering par buckets 0.22° (~20 km) fusionnés en 8-connexité
     from collections import defaultdict
     cell = 0.22
@@ -1163,7 +1201,8 @@ def update_data():
             # ---- mode France : zone nationale + ensembles des top incendies ----
             try:
                 fr = fetch_france_fires()
-                _warm_save('france_fires.json', fr)
+                if fr.get('hotspots'):
+            _warm_save('france_fires.json', fr)
                 _layer_cache['france_fires'] = (time.time(), fr)
                 _refresh_france_zone(fr)
                 # les ensembles nationaux tournent dans leur propre thread
@@ -2542,7 +2581,8 @@ def _france_boot():
         fr = fetch_france_fires()
         _warm_save('geo_names.json',
                    {f'{k[0]}|{k[1]}': v for k, v in _geo_names.items()})
-        _warm_save('france_fires.json', fr)
+        if fr.get('hotspots'):
+            _warm_save('france_fires.json', fr)
         _layer_cache['france_fires'] = (time.time(), fr)
         _refresh_france_zone(fr)
     except Exception as e:
