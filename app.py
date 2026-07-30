@@ -563,11 +563,62 @@ def zone_page():
     return _html('index.html')
 
 
+def _met_series(wf, lat, lon):
+    """Serie horaire vent/direction/temperature INTERPOLEE a un point,
+    calculee serveur : les deux sites lisent exactement les memes valeurs."""
+    try:
+        gl = np.asarray(wf['grid_lats']); gn = np.asarray(wf['grid_lons'])
+        gy = float(np.clip((lat - gl[0]) / (gl[-1] - gl[0]) * (len(gl) - 1),
+                           0, len(gl) - 1.001))
+        gx = float(np.clip((lon - gn[0]) / (gn[-1] - gn[0]) * (len(gn) - 1),
+                           0, len(gn) - 1.001))
+        i, j = int(gy), int(gx)
+        ty, tx = gy - i, gx - j
+
+        def bl(M):
+            M = np.asarray(M)
+            return (M[:, i, j] * (1-ty) * (1-tx) + M[:, i+1, j] * ty * (1-tx)
+                    + M[:, i, j+1] * (1-ty) * tx + M[:, i+1, j+1] * ty * tx)
+        sp = bl(wf['speed']); tp = bl(wf['temp'])
+        d2r = np.pi / 180.0
+        D = np.asarray(wf['dir']) * d2r
+        ue = (np.sin(D[:, i, j]) * (1-ty) * (1-tx)
+              + np.sin(D[:, i+1, j]) * ty * (1-tx)
+              + np.sin(D[:, i, j+1]) * (1-ty) * tx
+              + np.sin(D[:, i+1, j+1]) * ty * tx)
+        vn = (np.cos(D[:, i, j]) * (1-ty) * (1-tx)
+              + np.cos(D[:, i+1, j]) * ty * (1-tx)
+              + np.cos(D[:, i, j+1]) * (1-ty) * tx
+              + np.cos(D[:, i+1, j+1]) * ty * tx)
+        dr = (np.degrees(np.arctan2(ue, vn)) + 360) % 360
+        return {'times': wf['times'],
+                'speed': np.round(sp, 1).tolist(),
+                'dir': np.round(dr, 0).tolist(),
+                'temp': np.round(tp, 1).tolist()}
+    except Exception:
+        return None
+
+
 def _attach_scores(clusters):
+    fr_wf = (ZONES.get('france') or {}).get('wind_field')
     for c in clusters:
-        sc_z = (ZONES.get(c.get('zone')) or {}).get('sim_score')
+        z_c = ZONES.get(c.get('zone')) or {}
+        sc_z = z_c.get('sim_score')
         if sc_z:
             c['sim_score'] = sc_z
+        if not c.get('active'):
+            continue
+        # meteo du feu : le girondin lit le champ de la fiche officielle,
+        # les autres leur champ local de zone, sinon le champ national
+        if 44.0 <= c['lat'] <= 45.4 and -1.6 <= c['lon'] <= -0.2 \
+                and _wind_field is not None:
+            wf_c = _wind_field
+        else:
+            wf_c = z_c.get('wind_field') or fr_wf
+        if wf_c is not None:
+            ms = _met_series(wf_c, c['lat'], c['lon'])
+            if ms:
+                c['met'] = ms
     return clusters
 
 
@@ -600,9 +651,11 @@ def api_fires():
 ZONES = {}
 
 
-def _zone_bboxes(lat, lon):
-    sim = (round(lon - 0.8, 2), round(lat - 0.7, 2),
-           round(lon + 0.8, 2), round(lat + 0.7, 2))
+def _zone_bboxes(lat, lon, span=1.0):
+    """span<1 : petit feu -> petit domaine (simulation en secondes)."""
+    dx, dy = 0.8 * span, 0.7 * span
+    sim = (round(lon - dx, 2), round(lat - dy, 2),
+           round(lon + dx, 2), round(lat + dy, 2))
     view = [[round(lat - 0.37, 2), round(lon - 0.45, 2)],
             [round(lat + 0.36, 2), round(lon + 0.43, 2)]]
     return sim, view
@@ -953,7 +1006,8 @@ def _get_zone(zid):
         d = abs(c['lat'] - lat) + abs(c['lon'] - lon)
         if d < bd:
             best, bd = c, d
-    sim, view = _zone_bboxes(lat, lon)
+    span = 1.0 if (best or {}).get('frp_24h', 0) >= 500 else 0.45
+    sim, view = _zone_bboxes(lat, lon, span)
     z = {'id': zid, 'lat': lat, 'lon': lon,
          'name': (best or {}).get('name', ''),
          'sim_bbox': sim, 'view': view, 'ready': False,
@@ -1953,6 +2007,10 @@ def api_data():
         dz = dict(z['latest'])
         if z.get('sim_score'):
             dz['sim_score'] = z['sim_score']
+        if z.get('wind_field') is not None:
+            ms = _met_series(z['wind_field'], z['lat'], z['lon'])
+            if ms:
+                dz['met'] = ms
         return jsonify(dz)
     if latest_data:
         d = dict(latest_data)
@@ -1962,6 +2020,11 @@ def api_data():
         sc_g = _warm_load('sim_score_gironde.json')
         if sc_g:
             d['sim_score'] = sc_g
+        ct = (d.get('fire_perimeter') or {}).get('centroid') or {}
+        if _wind_field is not None and ct:
+            ms = _met_series(_wind_field, ct.get('lat', 44.6), ct.get('lon', -0.9))
+            if ms:
+                d['met'] = ms
         return jsonify(d)
     return jsonify({'error': 'No data available'}), 503
 
@@ -2801,7 +2864,11 @@ def _france_ens_loop():
             except Exception as esg:
                 print(f"score gironde err: {esg}")
             if ZONES.get('france', {}).get('ready'):
-                tops = _france_top_clusters(int(os.getenv('FR_HIRES', '6')))
+                tops = [c for c in ((_cached('france_fires', 3600,
+                                              fetch_france_fires)
+                                     or {}).get('clusters') or [])
+                        if c.get('active') and c.get('n_total', 0) >= 5
+                        ][:int(os.getenv('FR_HIRES', '30'))]
                 for c in tops:
                     _get_zone(c['zone'])       # lance les refresh de zone
                 for lv in ('med', 'low', 'high'):

@@ -708,15 +708,24 @@ function drawWindAt(ts){
   // coup d'oeil si le feu a le vent pour se propager
   let fires=[];
   if(ZONE==='france'){
-    fires=((state.data&&state.data.clusters)||[]).filter(c=>c.active).map(c=>[c.lat,c.lon]);
+    fires=((state.data&&state.data.clusters)||[]).filter(c=>c.active)
+      .map(c=>[c.lat,c.lon,c.met]);
   }else{
     const c=state.data&&state.data.fire_perimeter&&state.data.fire_perimeter.centroid;
-    if(c) fires=[[c.lat,c.lon]];
+    if(c) fires=[[c.lat,c.lon,state.data.met]];
   }
+  const tsKey=(ts||'').slice(0,13);
   if(fires.length){
     const off=ZONE==='france'?0.22:0.09;   // decalage pour ne pas couvrir le feu
     fires.forEach(f=>{
-      const wp=windAtPoint(w,k,f[0],f[1]); if(!wp) return;
+      let wp=null;
+      if(f[2]&&f[2].times){                 // serie SERVEUR : source unique
+        if(!f[2]._idx){f[2]._idx={};f[2].times.forEach((t2,q)=>{f[2]._idx[t2.slice(0,13)]=q;});}
+        const q=f[2]._idx[tsKey];
+        if(q!=null) wp={s:f[2].speed[q],dir:f[2].dir[q],t:f[2].temp[q]};
+      }
+      if(!wp) wp=windAtPoint(w,k,f[0],f[1]);
+      if(!wp) return;
       const s=wp.s, dir=wp.dir, t=wp.t!=null?Math.round(wp.t):null;
       const rot=(dir+90);
       const size=7+Math.min(s,22)*0.85;
