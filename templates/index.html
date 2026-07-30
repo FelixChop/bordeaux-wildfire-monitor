@@ -457,6 +457,7 @@ function renderStats(){
     <div class="stat" style="grid-column:1/-1"><div class="l">🛰️ Dernier passage satellite (foyers précis)</div><div class="v">${lastDet?fmtT(lastDet)+' ('+ago(lastDet)+')':'—'}</div></div>
     ${meteoTile(state.meteo)}
     ${pyroTile(d.pyro_watch)}
+    ${d.sim_score?`<div class="tile"><b>🎯 Fiabilité simulation</b><span><b>${d.sim_score.score}/100</b> — hier rejoué avec la vraie météo : ${d.sim_score.a_sim.toLocaleString('fr-FR')} ha simulés vs ${d.sim_score.a_obs.toLocaleString('fr-FR')} ha réellement détectés (recouvrement ${(d.sim_score.recall*100).toFixed(0)} %)</span></div>`:''}
     ${d.response?`<div class="tile"><b>🚒 Moyens engagés</b><span>${d.response.pompiers.toLocaleString('fr-FR')} pompiers · ${d.response.camions} camions`+
       (d.response.aeronefs?` · ✈️ ${d.response.aeronefs} aéronefs`:'')+
       (d.response.tracteurs?` · 🚜 ${d.response.tracteurs} tracteurs`:'')+
@@ -568,24 +569,31 @@ async function addClusterTargets(){
         (rp.aeronefs?` · ✈️ ${rp.aeronefs} aéronefs`:'')+
         (rp.tracteurs?` · 🚜 ${rp.tracteurs} tracteurs`:'')+`</span>`+
         `<br><small style="color:#9a8b81">${rp.detail?rp.detail+' — ':''}${rp.source}</small>`:'';
+      const sc=c.sim_score;
+      const scTxt=sc?`<br><small style="color:#64b5f6">🎯 fiabilité simulation : <b>${sc.score}/100</b> `+
+        `(hier rejoué : ${sc.a_sim.toLocaleString('fr-FR')} ha simulés vs ${sc.a_obs.toLocaleString('fr-FR')} ha réels)</small>`:'';
       L.circleMarker([c.lat,c.lon],{radius:Math.min(14+Math.sqrt(c.frp_24h)*.4,30),
         color:'rgba(255,152,0,.55)',weight:1.5,dashArray:'3,4',fill:true,
         fillColor:'#ff9800',fillOpacity:.06})
         .bindPopup(`<div style="font-size:12.5px;line-height:1.55"><b style="color:#ff9800">${c.name||'incendie'}</b><br>`+
           `${c.n_24h} foyer(s) détecté(s) sur 24 h<br>`+
           `intensité ${Math.round(c.frp_24h).toLocaleString('fr-FR')} MW<br>`+
-          `dernière détection : ${fmt(c.last_detection)}`+rpTxt+`</div>`)
+          `dernière détection : ${fmt(c.last_detection)}`+rpTxt+scTxt+`</div>`)
         .addTo(clusterLayer);
-      // la réponse humaine VISIBLE sur la carte : camions/avions/tracteurs
+      // la réponse humaine sur la carte, chaque moyen APPARAIT A SA DATE
+      // d'engagement (sol : ~6 h après détection, aérien : ~20 h ; Gironde :
+      // dates réelles des communiqués)
       if(rp&&(c.frp_24h>=250||rp.curated)){
-        const icons=['🚒'];
-        if(rp.aeronefs) icons.push('✈️');
-        if(rp.tracteurs) icons.push('🚜');
-        icons.forEach((em,q)=>{
+        const icons=[['🚒',rp.depuis_sol]];
+        if(rp.aeronefs) icons.push(['✈️',rp.depuis_air]);
+        if(rp.tracteurs) icons.push(['🚜',rp.depuis_sol]);
+        icons.forEach(([em,since],q)=>{
           const ic=L.divIcon({className:'',iconSize:[20,20],
             html:`<div style="font-size:15px;filter:drop-shadow(0 1px 2px #000)">${em}</div>`});
-          L.marker([c.lat-0.16,c.lon+(q-1)*0.22],{icon:ic,interactive:false})
-            .addTo(clusterLayer);
+          const mk=L.marker([c.lat-0.16,c.lon+(q-1)*0.22],
+            {icon:ic,interactive:false,opacity:1}).addTo(clusterLayer);
+          mk._depuis=since||null;
+          (state.respMarkers=state.respMarkers||[]).push(mk);
         });
       }
     });
@@ -738,6 +746,13 @@ function renderPastFrame(f,i){
     });
   }
   drawWindAt(f.timestamp);
+  // moyens engagés : visibles seulement à partir de leur date d'engagement
+  if(state.respMarkers&&f.timestamp){
+    const tk=f.timestamp.slice(0,16).replace(' ','T');
+    state.respMarkers.forEach(mk=>{
+      mk.setOpacity(!mk._depuis||tk>=mk._depuis?1:0);
+    });
+  }
   // ⚡ PAROXYSME : orage de feu probable à cet instant du passé
   const parox=state.parox&&state.parox.has(h);
   if(parox){

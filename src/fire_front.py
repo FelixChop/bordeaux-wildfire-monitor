@@ -323,6 +323,22 @@ def _run_once(dom, wind_field, wind_records, max_hours, pert=None,
                             burned[rr, cc] = True
                             ign[rr, cc] = h
 
+        # --- Reprises de braises --------------------------------------------
+        # Un sol brule garde des braises ~3 jours : par vent >6 m/s, une
+        # cellule refroidie au contact de combustible intact peut repartir
+        # (P ~0.5 %/h/cellule, modulable scenario 'rekindle').
+        if rng is not None and h > 6:
+            rk = float(sc.get('rekindle', 0.005))
+            if rk > 0:
+                embers = (burned & (ign < h - 6) & (ign > h - 72) & ~contained
+                          & binary_dilation(~burned & (fuel_grid > 0.2), _ones33)
+                          & (speed > 6.0))
+                er2, ec2 = np.where(embers)
+                if len(er2):
+                    rekin = rng.random(len(er2)) < rk * np.clip(
+                        speed[er2, ec2] / 8.0, 0.5, 2.5)
+                    if rekin.any():
+                        ign[er2[rekin], ec2[rekin]] = h   # redevient front actif
         # --- Active firefighting (capacity-limited) -------------------------
         if suppression and rng is not None:
             ramp_c = min(1.0, h / 18.0)

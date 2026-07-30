@@ -471,6 +471,8 @@ def fetch_france_fires():
                 n24 += 1
             if h.get('timestamp') and h['timestamp'] > last:
                 last = h['timestamp']
+        first = min((h['timestamp'] for h in m if h.get('timestamp')),
+                    default=None)
         w = [max(h.get('frp', 1), 1) for h in m]
         sw = sum(w)
         lat = sum(h['lat'] * wi for h, wi in zip(m, w)) / sw
@@ -479,6 +481,7 @@ def fetch_france_fires():
                     'lat': round(lat, 3), 'lon': round(lon, 3),
                     'n_total': len(m), 'n_24h': n24,
                     'frp_24h': round(frp24), 'last_detection': last,
+                    'first_detection': first,
                     'active': n24 > 0})
     out.sort(key=lambda c: -c['frp_24h'])
     kept = []
@@ -492,6 +495,9 @@ def fetch_france_fires():
     for c in kept:
         if c.get('active'):
             c['response'] = _fire_response(c)
+            sc_z = (ZONES.get(c['zone']) or {}).get('sim_score')
+            if sc_z:
+                c['sim_score'] = sc_z
     return {'ts': now.strftime('%Y-%m-%dT%H:00Z'), 'clusters': kept,
             'hotspots': hotspots}
 
@@ -1161,9 +1167,7 @@ def compute_zone_ensemble(zid, lutte='med', wait=False):
         views = {}
         for v in _VIEWS:
             views[v] = _normalize_ts(derive_view(store, v))
-        prev_hr = (z['ens'].get(lutte) or {}).get('views_hr')
-        z['ens'][lutte] = {'ver': ver, 'views': views, 'store': store,
-                           'views_hr': prev_hr}   # fusion 500 m conservée
+        z['ens'][lutte] = {'ver': ver, 'views': views, 'store': store}
         print(f"✓ Ensemble zone {zid} lutte={lutte} prêt")
         return views
     finally:
@@ -1183,9 +1187,19 @@ def _fire_response(c):
     if frp < 40:
         return None
     pompiers = int(np.clip(50 + frp * 0.22, 30, 2500))
+    first = c.get('first_detection')
+    dep_sol = dep_air = None
+    if first:
+        try:
+            f0 = _parse_ts(first)
+            dep_sol = (f0 + timedelta(hours=6)).strftime('%Y-%m-%dT%H:00')
+            dep_air = (f0 + timedelta(hours=20)).strftime('%Y-%m-%dT%H:00')
+        except (TypeError, ValueError):
+            pass
     return {'pompiers': pompiers, 'camions': max(4, pompiers // 4),
             'aeronefs': (int(min(6, frp // 1200 + 1)) if frp > 700 else 0),
             'tracteurs': max(0, pompiers // 12),
+            'depuis_sol': dep_sol, 'depuis_air': dep_air,
             'source': 'estimation (échelle du feu)', 'curated': False}
 
 
@@ -1615,7 +1629,8 @@ def api_scenario():
         if not (view_f in _VIEWS or (view_f.startswith('m') and view_f[1:].isdigit())):
             view_f = 'ref'
         ent_f = (z.get('ens') or {}).get(lutte) or {}
-        data_f = ((ent_f.get('views_hr') or {}).get(view_f)
+        hr_ok = ent_f.get('hr_ver') == ent_f.get('ver')
+        data_f = (((ent_f.get('views_hr') or {}).get(view_f) if hr_ok else None)
                   or (ent_f.get('views') or {}).get(view_f))
         if data_f is None and ent_f.get('store') is not None:
             from src.fire_front import derive_view
@@ -1897,12 +1912,18 @@ def api_data():
     if z is not None:
         if not z.get('ready'):
             return jsonify({'error': 'Zone loading'}), 503
-        return jsonify(z['latest'])
+        dz = dict(z['latest'])
+        if z.get('sim_score'):
+            dz['sim_score'] = z['sim_score']
+        return jsonify(dz)
     if latest_data:
         d = dict(latest_data)
         d['zone'] = {'id': 'gironde', 'name': 'Gironde',
                      'view': [[44.33, -1.35], [45.06, -0.45]],
                      'sim_bbox': list(SIM_BBOX)}
+        sc_g = _warm_load('sim_score_gironde.json')
+        if sc_g:
+            d['sim_score'] = sc_g
         return jsonify(d)
     return jsonify({'error': 'No data available'}), 503
 
@@ -2598,6 +2619,7 @@ def _france_boot():
             if _w2 and _w2.get('views'):
                 ZONES.setdefault('france', {'id': 'france', 'ready': False, 'ens': {}})
                 ZONES['france']['ens'][_lv] = {'ver': _w2.get('ver'),
+                                               'hr_ver': _w2.get('hr_ver'),
                                                'views': _w2['views'],
                                                'views_hr': _w2.get('views_hr')}
                 print(f"✓ Warm: ensemble national lutte={_lv}")
@@ -2659,6 +2681,31 @@ def _merge_hires_views(nat_views, hires):
     return out
 
 
+def _score_zone(z):
+    """Score de fiabilite du modele pour CE feu : backtest 24 h — on rejoue
+    hier avec la vraie meteo et les params calibres, on compare au reel."""
+    try:
+        from src.backtest import _window_loss
+        wf = z.get('wind_field')
+        hs = ((z.get('latest') or {}).get('firms') or {}).get('hotspots') or []
+        if not wf or len(hs) < 15 or z.get('veg') is None:
+            return
+        now_key = datetime.utcnow().strftime('%Y-%m-%dT%H:00')
+        now_idx = next((i for i, t in enumerate(wf['times'])
+                        if t >= now_key), len(wf['times']) - 1)
+        params = {**_sim_params()}
+        r = _window_loss(hs, wf, z['veg'], z['sim_bbox'],
+                         max(now_idx - 24, 1), 24, params, n_runs=1)
+        if r:
+            score = int(np.clip(100 * np.exp(-r['loss']), 3, 97))
+            z['sim_score'] = {'score': score, 'a_sim': r['a_sim'],
+                              'a_obs': r['a_obs'], 'recall': r['recall'],
+                              'date': now_key}
+            print(f"✓ Score simulation {z['id']} : {score}/100")
+    except Exception as e:
+        print(f"score zone {z.get('id')} err: {e}")
+
+
 def _france_ens_loop():
     """Recalcule les ensembles nationaux en continu (ver change chaque heure) ;
     sert toujours la derniere version terminee pendant le calcul."""
@@ -2690,6 +2737,18 @@ def _france_ens_loop():
                                   f"(loss {best['loss']:.3f})")
                 except Exception as ebt:
                     print(f"backtest err: {ebt}")
+            # score de fiabilite de la fiche Gironde (backtest 24 h quotidien)
+            try:
+                if latest_data and _wind_field is not None \
+                        and _veg_cache.get('fuel') is not None:
+                    zg = {'id': 'gironde', 'wind_field': _wind_field,
+                          'latest': latest_data,
+                          'veg': _veg_cache['fuel'], 'sim_bbox': SIM_BBOX}
+                    _score_zone(zg)
+                    if zg.get('sim_score'):
+                        _warm_save('sim_score_gironde.json', zg['sim_score'])
+            except Exception as esg:
+                print(f"score gironde err: {esg}")
             if ZONES.get('france', {}).get('ready'):
                 tops = _france_top_clusters(int(os.getenv('FR_HIRES', '6')))
                 for c in tops:
@@ -2711,6 +2770,8 @@ def _france_ens_loop():
                             zv = compute_zone_ensemble(c['zone'], lv, wait=True)
                             if zv:
                                 hires.append((zz['sim_bbox'], zv))
+                            if lv == 'med':
+                                _score_zone(zz)
                         except Exception as e3:
                             print(f"hires {c['zone']}/{lv} err: {e3}")
                     ent_fr = ZONES['france']['ens'].get(lv)
@@ -2718,9 +2779,11 @@ def _france_ens_loop():
                         if hires:
                             ent_fr['views_hr'] = _merge_hires_views(
                                 ent_fr['views'], hires)
+                            ent_fr['hr_ver'] = ent_fr['ver']
                             print(f"✓ Fusion hi-res {lv} : {len(hires)} feux à 500 m")
                         _warm_save(f'france_views_{lv}.json',
                                    {'ver': ent_fr['ver'],
+                                    'hr_ver': ent_fr.get('hr_ver'),
                                     'views': ent_fr['views'],
                                     'views_hr': ent_fr.get('views_hr')})
                 # zones ouvertes par les utilisateurs (fiches) : leur ensemble
