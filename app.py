@@ -1202,7 +1202,7 @@ def update_data():
             try:
                 fr = fetch_france_fires()
                 if fr.get('hotspots'):
-            _warm_save('france_fires.json', fr)
+                    _warm_save('france_fires.json', fr)
                 _layer_cache['france_fires'] = (time.time(), fr)
                 _refresh_france_zone(fr)
                 # les ensembles nationaux tournent dans leur propre thread
