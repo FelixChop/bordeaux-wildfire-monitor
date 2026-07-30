@@ -73,7 +73,39 @@ def _firms_confident(raw):
         return False
 
 
-def _fetch_firms_product(map_key, product, bbox, days=5):
+# Debut officiel de l'evenement : l'incendie bordelais s'est declare le
+# mercredi 22 juillet. La timeline reste ANCREE a cette date (les detections
+# sont archivees sur disque pour survivre a la fenetre glissante des APIs).
+FIRE_T0 = datetime(2026, 7, 22)
+
+
+def _firms_days():
+    """Nb de jours a demander a FIRMS pour couvrir depuis FIRE_T0 (max API 10)."""
+    return int(np.clip((datetime.utcnow() - FIRE_T0).days + 1, 5, 10))
+
+
+def _merge_archive(name, hotspots):
+    """Fusionne les detections avec l'archive disque (dedupe, >= FIRE_T0)."""
+    arch = _warm_load(name) or []
+    seen = {(round(h['lat'], 4), round(h['lon'], 4), h.get('timestamp'), h.get('sat'))
+            for h in arch}
+    added = 0
+    for h in hotspots:
+        k = (round(h['lat'], 4), round(h['lon'], 4), h.get('timestamp'), h.get('sat'))
+        if k not in seen:
+            arch.append(h)
+            seen.add(k)
+            added += 1
+    t0s = FIRE_T0.strftime('%Y-%m-%d')
+    arch = [h for h in arch if (h.get('timestamp') or '') >= t0s]
+    if added:
+        _warm_save(name, arch)
+    return arch
+
+
+def _fetch_firms_product(map_key, product, bbox, days=None):
+    if days is None:
+        days = _firms_days()
     """Fetch one FIRMS product; return list of hotspot dicts."""
     url = (f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{map_key}/"
            f"{product}/{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}/{days}")
@@ -111,6 +143,7 @@ def fetch_nasa_firms():
     hotspots = []
     for product in _FIRMS_PRODUCTS:
         hotspots.extend(_fetch_firms_product(map_key, product, bbox))
+    hotspots = _merge_archive('fire_archive_gironde.json', hotspots)
 
     if hotspots:
         last_ts = max((h['timestamp'] for h in hotspots), default=None)
@@ -204,7 +237,7 @@ def fetch_wind_field(n=6, hours=312):  # 5 past days + 8 forecast days
             'longitude': ','.join(map(str, lons_q)),
             'hourly': 'wind_speed_10m,wind_direction_10m,relative_humidity_2m,'
                       'temperature_2m,soil_moisture_0_to_7cm',
-            'past_days': 5, 'forecast_days': 8, 'timezone': 'UTC',
+            'past_days': 10, 'forecast_days': 8, 'timezone': 'UTC',
         }, timeout=20)
         if r.status_code != 200:
             return None
@@ -362,7 +395,8 @@ def fetch_france_fires():
     map_key = os.getenv('NASA_FIRMS_MAP_KEY', 'DEMO_KEY')
     hotspots = []
     for product in _FIRMS_PRODUCTS:
-        hotspots.extend(_fetch_firms_product(map_key, product, FR_BBOX, days=5))
+        hotspots.extend(_fetch_firms_product(map_key, product, FR_BBOX))
+    hotspots = _merge_archive('fire_archive_france.json', hotspots)
     # clustering par buckets 0.22° (~20 km) fusionnés en 8-connexité
     from collections import defaultdict
     cell = 0.22
@@ -653,7 +687,7 @@ def fetch_air_field_bbox(bbox):
         try:
             r = requests.get('https://air-quality-api.open-meteo.com/v1/air-quality', params={
                 'latitude': ','.join(map(str, laq)), 'longitude': ','.join(map(str, loq)),
-                'hourly': 'european_aqi,pm2_5', 'past_days': 5, 'forecast_days': 7,
+                'hourly': 'european_aqi,pm2_5', 'past_days': 10, 'forecast_days': 7,
                 'timezone': 'UTC'}, timeout=40)
             if r.status_code == 200:
                 break
@@ -709,7 +743,7 @@ def fetch_wind_field_bbox(bbox, n=6):
             'longitude': ','.join(map(str, loq)),
             'hourly': 'wind_speed_10m,wind_direction_10m,relative_humidity_2m,'
                       'temperature_2m,soil_moisture_0_to_7cm',
-            'past_days': 5, 'forecast_days': 8, 'timezone': 'UTC'}, timeout=25)
+            'past_days': 10, 'forecast_days': 8, 'timezone': 'UTC'}, timeout=25)
         if r.status_code != 200:
             return None
         results = r.json()
@@ -745,7 +779,7 @@ def _zone_refresh(z):
         map_key = os.getenv('NASA_FIRMS_MAP_KEY', 'DEMO_KEY')
         hotspots = []
         for product in _FIRMS_PRODUCTS:
-            hotspots.extend(_fetch_firms_product(map_key, product, bbox, days=5))
+            hotspots.extend(_fetch_firms_product(map_key, product, bbox))
         last_ts = max((h['timestamp'] for h in hotspots), default=None)
         sats = sorted({h.get('sat') for h in hotspots})
         clat, clon = z['lat'], z['lon']
@@ -1317,7 +1351,7 @@ def api_fire_history():
         return jsonify({'error': 'No data available'}), 503
     hotspots = src_data['firms'].get('hotspots', [])
     now = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
-    start = now - timedelta(days=5)
+    start = FIRE_T0
     pts = []
     for h in hotspots:
         dt = _parse_ts(h.get('timestamp'))
@@ -2073,7 +2107,7 @@ def fetch_air_field():
         try:
             r = requests.get('https://air-quality-api.open-meteo.com/v1/air-quality', params={
                 'latitude': ','.join(map(str, laq)), 'longitude': ','.join(map(str, loq)),
-                'hourly': 'european_aqi,pm2_5', 'past_days': 5, 'forecast_days': 7,
+                'hourly': 'european_aqi,pm2_5', 'past_days': 10, 'forecast_days': 7,
                 'timezone': 'UTC'}, timeout=40)
             if r.status_code == 200:
                 break
