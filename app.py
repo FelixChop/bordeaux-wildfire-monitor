@@ -1170,6 +1170,25 @@ def compute_zone_ensemble(zid, lutte='med', wait=False):
         _lk.release()
 
 
+def _fire_response(c):
+    """Moyens engages sur un feu : chiffres CURES (communiques officiels,
+    warm deployments.json) si disponibles, sinon estimation d'echelle
+    coherente avec le modele de lutte (calibree : Gironde 750 pompiers
+    pour ~3300 MW de FRP 24 h)."""
+    dep = _warm_load('deployments.json') or {}
+    if 44.0 <= c.get('lat', 0) <= 45.4 and -1.6 <= c.get('lon', 0) <= -0.2 \
+            and dep.get('gironde'):
+        return {**dep['gironde'], 'curated': True}
+    frp = float(c.get('frp_24h') or 0)
+    if frp < 40:
+        return None
+    pompiers = int(np.clip(50 + frp * 0.22, 30, 2500))
+    return {'pompiers': pompiers, 'camions': max(4, pompiers // 4),
+            'aeronefs': (int(min(6, frp // 1200 + 1)) if frp > 700 else 0),
+            'tracteurs': max(0, pompiers // 12),
+            'source': 'estimation (échelle du feu)', 'curated': False}
+
+
 def fetch_pyro_watch(lat, lon, hotspots):
     """Real-time pyroCumulonimbus watch over the fire zone.
 
