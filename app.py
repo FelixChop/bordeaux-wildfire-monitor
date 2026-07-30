@@ -624,6 +624,43 @@ def fetch_vegetation_bbox(bbox):
 
 _air_block_until = 0.0
 
+# Series nationales APPEND-ONLY : le passe est telecharge UNE fois puis
+# conserve sur disque ; chaque cycle ne rafraichit que l'heure nouvelle et
+# la prevision. L'historique reste ancre a FIRE_T0 meme quand la fenetre
+# des APIs (10 j) aura glisse au-dela.
+_WX_KEYS = ('speed', 'dir', 'rh', 'temp', 'soil')
+_AIR_KEYS = ('aqi', 'pm25', 'pm10', 'co', 'no2', 'o3')
+
+
+def _merge_series(store, new, keys):
+    """Fusionne une serie temporelle {times, k: [par heure]} dans le store :
+    les heures connues sont mises a jour (prevision -> reanalyse), les
+    nouvelles ajoutees ; tri chronologique ; coupe avant FIRE_T0."""
+    if not new:
+        return store
+    if not store or store.get('grid_lats') != new.get('grid_lats')             or store.get('grid_lons') != new.get('grid_lons')             or store.get('bbox') != new.get('bbox'):
+        return new                       # grille changee -> reset propre
+    idx = {t: i for i, t in enumerate(store['times'])}
+    for j, t in enumerate(new['times']):
+        i = idx.get(t)
+        if i is None:
+            store['times'].append(t)
+            for k in keys:
+                if store.get(k) is not None and new.get(k) is not None:
+                    store[k].append(new[k][j])
+        else:
+            for k in keys:
+                if store.get(k) is not None and new.get(k) is not None:
+                    store[k][i] = new[k][j]
+    order = sorted(range(len(store['times'])), key=lambda q: store['times'][q])
+    t0s = FIRE_T0.strftime('%Y-%m-%dT%H:%M')
+    keep = [q for q in order if store['times'][q] >= t0s]
+    store['times'] = [store['times'][q] for q in keep]
+    for k in keys:
+        if store.get(k) is not None:
+            store[k] = [store[k][q] for q in keep]
+    return store
+
 
 def fetch_air_sensors_fallback():
     """Qualite de l'air OBSERVEE via les capteurs sensor.community (reseau
@@ -725,8 +762,10 @@ def fetch_air_field_bbox(bbox):
         try:
             r = requests.get('https://air-quality-api.open-meteo.com/v1/air-quality', params={
                 'latitude': ','.join(map(str, laq)), 'longitude': ','.join(map(str, loq)),
-                'hourly': 'european_aqi,pm2_5', 'past_days': 10, 'forecast_days': 7,
-                'timezone': 'UTC'}, timeout=40)
+                'hourly': 'european_aqi,pm2_5,pm10,carbon_monoxide,'
+                          'nitrogen_dioxide,ozone',
+                'past_days': past_days, 'forecast_days': 7,
+                'timezone': 'UTC'}, timeout=60)
             if r.status_code == 200:
                 break
             if r.status_code == 429:     # rate-limite : on n'insiste PAS
@@ -744,29 +783,31 @@ def fetch_air_field_bbox(bbox):
         res = [res]
     times = res[0].get('hourly', {}).get('time', [])
     T = len(times)
-    aqi = np.zeros((T, n_lat, n_lon))
-    pm25 = np.zeros((T, n_lat, n_lon))
+    src_keys = {'aqi': 'european_aqi', 'pm25': 'pm2_5', 'pm10': 'pm10',
+                'co': 'carbon_monoxide', 'no2': 'nitrogen_dioxide',
+                'o3': 'ozone'}
+    grids = {k: np.zeros((T, n_lat, n_lon)) for k in src_keys}
     for idx, x in enumerate(res[:n_lat * n_lon]):
         h = x.get('hourly', {})
-        a = h.get('european_aqi') or []
-        p = h.get('pm2_5') or []
         i, j = idx // n_lon, idx % n_lon
-        last_a, last_p = 0.0, 0.0
-        for t in range(T):
-            va = a[t] if t < len(a) else None
-            vp = p[t] if t < len(p) else None
-            if va is not None:
-                last_a = va
-            if vp is not None:
-                last_p = vp
-            aqi[t, i, j] = last_a          # persistance au-dela de l'horizon
-            pm25[t, i, j] = last_p
-    return {'times': times, 'bbox': [lat0, lon0, lat1, lon1],
-            'aqi': aqi.round(0).tolist(), 'pm25': pm25.round(1).tolist()}
+        for k, sk in src_keys.items():
+            arr = h.get(sk) or []
+            last = 0.0
+            g = grids[k]
+            for t in range(T):
+                v = arr[t] if t < len(arr) else None
+                if v is not None:
+                    last = v
+                g[t, i, j] = last        # persistance au-dela de l'horizon
+    out = {'times': times, 'bbox': [lat0, lon0, lat1, lon1],
+           'g': f'{n_lat}x{n_lon}'}
+    for k in src_keys:
+        out[k] = grids[k].round(1).tolist()
+    return out
 
 
-def fetch_wind_field_bbox(bbox, n=6):
-    """Champ de vent 6x6 pour une bbox de zone (past 5 j + prev 8 j)."""
+def fetch_wind_field_bbox(bbox, n=6, past_days=10):
+    """Champ de vent n x n pour une bbox (passe parametrable + prev 8 j)."""
     lon0, lat0, lon1, lat1 = bbox
     grid_lats = list(np.linspace(lat0, lat1, n))
     grid_lons = list(np.linspace(lon0, lon1, n))
@@ -781,13 +822,14 @@ def fetch_wind_field_bbox(bbox, n=6):
             'longitude': ','.join(map(str, loq)),
             'hourly': 'wind_speed_10m,wind_direction_10m,relative_humidity_2m,'
                       'temperature_2m,soil_moisture_0_to_7cm',
-            'past_days': 10, 'forecast_days': 8, 'timezone': 'UTC'}, timeout=25)
+            'past_days': past_days, 'forecast_days': 8,
+            'timezone': 'UTC'}, timeout=40)
         if r.status_code != 200:
             return None
         results = r.json()
         if isinstance(results, dict):
             results = [results]
-        times = results[0]['hourly']['time'][:312]
+        times = results[0]['hourly']['time'][:(past_days + 8) * 24]
         arrs = {k: np.zeros((len(times), n, n)) for k in
                 ('speed', 'dir', 'rh', 'temp', 'soil')}
         keys = {'speed': 'wind_speed_10m', 'dir': 'wind_direction_10m',
@@ -804,7 +846,8 @@ def fetch_wind_field_bbox(bbox, n=6):
                     arrs[k][t, i, j] = defaults[k] if v is None else v
         return {'grid_lats': [round(float(x), 4) for x in grid_lats],
                 'grid_lons': [round(float(x), 4) for x in grid_lons],
-                'times': times, **arrs}
+                'times': times, 'g': f'{n}x{n}', 'bbox': list(bbox),
+                **{k: v.round(2).tolist() for k, v in arrs.items()}}
     except Exception as e:
         print(f"wind zone error: {e}")
         return None
@@ -906,8 +949,23 @@ def _refresh_france_zone(fr):
         z['sim_bbox'] = FR_SIM_BBOX
         z['view'] = FRANCE_VIEW
         z['name'] = 'France'
-        z['wind_field'] = fetch_wind_field_bbox(FR_SIM_BBOX) or z.get('wind_field')
-        af_new = fetch_air_field_bbox(FR_SIM_BBOX)
+        # STORE meteo incremental : passe telecharge une fois (ancre FIRE_T0),
+        # puis seulement les heures recentes + la prevision a chaque cycle
+        wx_prev = z.get('wind_field') or _warm_load('france_wx.json')
+        first_wx = not (wx_prev and wx_prev.get('g') == '10x10')
+        wf_new = fetch_wind_field_bbox(FR_SIM_BBOX, n=10,
+                                       past_days=10 if first_wx else 2)
+        z['wind_field'] = _merge_series(wx_prev, wf_new, _WX_KEYS) \
+            or wx_prev or wf_new
+        if wf_new and z['wind_field']:
+            _warm_save('france_wx.json', z['wind_field'])
+        # STORE air incremental (grille densifiee 10x14, polluants complets)
+        air_prev = z.get('air_field') or _warm_load('france_air.json')
+        first_air = not (air_prev and air_prev.get('g') == '10x14')
+        af_new = fetch_air_field_bbox(FR_SIM_BBOX, n_lat=10, n_lon=14,
+                                      past_days=10 if first_air else 2)
+        af_new = _merge_series(air_prev if not first_air else None,
+                               af_new, _AIR_KEYS) or af_new
         if af_new is not None:
             try:
                 sens = fetch_air_sensors_fallback()
@@ -2131,59 +2189,9 @@ def api_air_quality_png():
 
 
 def fetch_air_field():
-    """Hourly CAMS air field (EAQI index + PM2.5 µg/m³): past 5 d + forecast 7 d."""
-    n_lat, n_lon = 9, 10
-    lat0, lat1, lon0, lon1 = 44.20, 45.55, -1.75, -0.25
-    lats = np.linspace(lat0, lat1, n_lat)
-    lons = np.linspace(lon0, lon1, n_lon)
-    laq, loq = [], []
-    for la in lats:
-        for lo in lons:
-            laq.append(round(float(la), 3))
-            loq.append(round(float(lo), 3))
-    r = None
-    for att in range(3):
-        try:
-            r = requests.get('https://air-quality-api.open-meteo.com/v1/air-quality', params={
-                'latitude': ','.join(map(str, laq)), 'longitude': ','.join(map(str, loq)),
-                'hourly': 'european_aqi,pm2_5', 'past_days': 10, 'forecast_days': 7,
-                'timezone': 'UTC'}, timeout=40)
-            if r.status_code == 200:
-                break
-            if r.status_code == 429:     # rate-limite : on n'insiste PAS
-                _air_block_until = time.time() + 900
-                print("air bbox 429 -> pause 15 min")
-                return None
-        except requests.RequestException as e:
-            print(f"air bbox fetch essai {att + 1}: {e}")
-        time.sleep(4)
-    if r is None or r.status_code != 200:
-        print(f"air bbox KO ({'HTTP ' + str(r.status_code) if r is not None else 'reseau'})")
-        return None
-    res = r.json()
-    if isinstance(res, dict):
-        res = [res]
-    times = res[0].get('hourly', {}).get('time', [])
-    T = len(times)
-    aqi = np.zeros((T, n_lat, n_lon))
-    pm25 = np.zeros((T, n_lat, n_lon))
-    for idx, x in enumerate(res[:n_lat * n_lon]):
-        h = x.get('hourly', {})
-        a = h.get('european_aqi') or []
-        p = h.get('pm2_5') or []
-        i, j = idx // n_lon, idx % n_lon
-        last_a, last_p = 0.0, 0.0
-        for t in range(T):
-            va = a[t] if t < len(a) else None
-            vp = p[t] if t < len(p) else None
-            if va is not None:
-                last_a = va
-            if vp is not None:
-                last_p = vp
-            aqi[t, i, j] = last_a          # persistance au-dela de l'horizon
-            pm25[t, i, j] = last_p
-    return {'times': times, 'bbox': [lat0, lon0, lat1, lon1],
-            'aqi': aqi.round(0).tolist(), 'pm25': pm25.round(1).tolist()}
+    """Champ air Gironde : simple vue du fetch bbox commun (polluants inclus)."""
+    return fetch_air_field_bbox((-1.75, 44.20, -0.25, 45.55),
+                                n_lat=9, n_lon=10)
 
 
 @app.route('/api/air-field')
