@@ -2703,13 +2703,21 @@ def _merge_hires_views(nat_views, hires):
             continue
         d = dict(nat)
         frames = []
+        # alignement par TIMESTAMP : les ensembles zone/gironde ne partent pas
+        # exactement a la meme heure que le national
+        z_by_ts = [({(zf.get('timestamp') or '')[:13]: zf
+                     for zf in (zv.get('frames') or [])}, bb, zv)
+                   for bb, zv in zvs]
         for i, f in enumerate(nat['frames']):
             f2 = dict(f)
             pts = [p for p in (f.get('new_points') or []) if not _inside(p)]
-            for bb, zv in zvs:
-                zfs = zv.get('frames') or []
-                if i < len(zfs):
-                    pts.extend(zfs[i].get('new_points') or [])
+            key_ts = (f.get('timestamp') or '')[:13]
+            for zmap, bb, zv in z_by_ts:
+                zf = zmap.get(key_ts)
+                if zf is None and i < len(zv.get('frames') or []):
+                    zf = zv['frames'][i]          # secours : index
+                if zf is not None:
+                    pts.extend(zf.get('new_points') or [])
             f2['new_points'] = pts
             frames.append(f2)
         d['frames'] = frames
