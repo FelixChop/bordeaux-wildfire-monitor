@@ -489,6 +489,9 @@ def fetch_france_fires():
                 continue                     # cluster hors de France
             c['name'] = nm
         kept.append(c)
+    for c in kept:
+        if c.get('active'):
+            c['response'] = _fire_response(c)
     return {'ts': now.strftime('%Y-%m-%dT%H:00Z'), 'clusters': kept,
             'hotspots': hotspots}
 
@@ -889,6 +892,8 @@ def _zone_refresh(z):
             'wind': {'hourly_wind': wind_series},
             'air': None,
             'pyro_watch': fetch_pyro_watch(clat, clon, hotspots),
+            'response': _fire_response({'lat': clat, 'lon': clon,
+                                        'frp_24h': 3000}),
         }
         z['air_field'] = (_air_subset(bbox) or fetch_air_field_bbox(bbox)
                           or z.get('air_field'))
@@ -1242,6 +1247,9 @@ def update_data():
                 'air': fetch_air_quality(),
                 'pyro_watch': fetch_pyro_watch(centroid_lat, centroid_lon,
                                                firms['hotspots']),
+                'response': _fire_response({'lat': centroid_lat,
+                                            'lon': centroid_lon,
+                                            'frp_24h': 3000}),
             }
 
             last_update = datetime.utcnow()

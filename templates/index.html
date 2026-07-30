@@ -392,6 +392,17 @@ async function boot(){
         const mt=document.getElementById('menuTitle'); if(mt) mt.textContent='🔥 '+data.zone.name;
       }
       if(ZONE&&ZONE!=='france'&&HOST_FR) $('backBtn').style.display='block';
+      // fiche : moyens engagés matérialisés près du feu
+      if(ZONE!=='france'&&data.response&&data.fire_perimeter&&data.fire_perimeter.centroid){
+        const ct=data.fire_perimeter.centroid;
+        const icons=['🚒']; if(data.response.aeronefs)icons.push('✈️');
+        if(data.response.tracteurs)icons.push('🚜');
+        icons.forEach((em,q)=>{
+          const ic=L.divIcon({className:'',iconSize:[22,22],
+            html:`<div style="font-size:17px;filter:drop-shadow(0 1px 2px #000)">${em}</div>`});
+          L.marker([ct.lat-0.07,ct.lon+(q-1)*0.09],{icon:ic,interactive:false}).addTo(map);
+        });
+      }
     }
     if(sim.pyro_runs!=null&&sim.n_runs)
       setTimeout(()=>{const e=$('pyroProba');if(e)e.textContent=Math.round(sim.pyro_runs/sim.n_runs*100)+' %';},0);
@@ -446,6 +457,10 @@ function renderStats(){
     <div class="stat" style="grid-column:1/-1"><div class="l">🛰️ Dernier passage satellite (foyers précis)</div><div class="v">${lastDet?fmtT(lastDet)+' ('+ago(lastDet)+')':'—'}</div></div>
     ${meteoTile(state.meteo)}
     ${pyroTile(d.pyro_watch)}
+    ${d.response?`<div class="tile"><b>🚒 Moyens engagés</b><span>${d.response.pompiers.toLocaleString('fr-FR')} pompiers · ${d.response.camions} camions`+
+      (d.response.aeronefs?` · ✈️ ${d.response.aeronefs} aéronefs`:'')+
+      (d.response.tracteurs?` · 🚜 ${d.response.tracteurs} tracteurs`:'')+
+      `<br><small>${d.response.detail?d.response.detail+' — ':''}${d.response.source}</small></span></div>`:''}
     ${airTile(d.air)}`;
   $('src').innerHTML=`Foyers : NASA FIRMS ${sats?'('+sats+')':''} · Météo : Open-Meteo · Végétation : NDVI MODIS<br>Surveillance actualisée chaque heure · dernière vérif : ${fmtT(d.timestamp+'Z')}`;
 }
@@ -548,14 +563,31 @@ async function addClusterTargets(){
       // cible cliquable (zoom vers la fiche locale)
       const fmt=iso=>{if(!iso)return '—';const dd=new Date(iso.replace(' ','T')+(iso.endsWith('Z')?'':'Z'));
         return dd.toLocaleString('fr-FR',{weekday:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});};
+      const rp=c.response;
+      const rpTxt=rp?`<br><span style="color:#8bc34a">🚒 ${rp.pompiers.toLocaleString('fr-FR')} pompiers · ${rp.camions} camions`+
+        (rp.aeronefs?` · ✈️ ${rp.aeronefs} aéronefs`:'')+
+        (rp.tracteurs?` · 🚜 ${rp.tracteurs} tracteurs`:'')+`</span>`+
+        `<br><small style="color:#9a8b81">${rp.detail?rp.detail+' — ':''}${rp.source}</small>`:'';
       L.circleMarker([c.lat,c.lon],{radius:Math.min(14+Math.sqrt(c.frp_24h)*.4,30),
         color:'rgba(255,152,0,.55)',weight:1.5,dashArray:'3,4',fill:true,
         fillColor:'#ff9800',fillOpacity:.06})
         .bindPopup(`<div style="font-size:12.5px;line-height:1.55"><b style="color:#ff9800">${c.name||'incendie'}</b><br>`+
           `${c.n_24h} foyer(s) détecté(s) sur 24 h<br>`+
           `intensité ${Math.round(c.frp_24h).toLocaleString('fr-FR')} MW<br>`+
-          `dernière détection : ${fmt(c.last_detection)}</div>`)
+          `dernière détection : ${fmt(c.last_detection)}`+rpTxt+`</div>`)
         .addTo(clusterLayer);
+      // la réponse humaine VISIBLE sur la carte : camions/avions/tracteurs
+      if(rp&&(c.frp_24h>=250||rp.curated)){
+        const icons=['🚒'];
+        if(rp.aeronefs) icons.push('✈️');
+        if(rp.tracteurs) icons.push('🚜');
+        icons.forEach((em,q)=>{
+          const ic=L.divIcon({className:'',iconSize:[20,20],
+            html:`<div style="font-size:15px;filter:drop-shadow(0 1px 2px #000)">${em}</div>`});
+          L.marker([c.lat-0.16,c.lon+(q-1)*0.22],{icon:ic,interactive:false})
+            .addTo(clusterLayer);
+        });
+      }
     });
   }catch(e){}
 }
@@ -616,10 +648,27 @@ function render(i){
 }
 function goLive(){ if(state.playing) stop(); render(state.nowIdx); }
 
+function windAtPoint(w,k,la,lo){
+  // interpolation bilineaire du champ a la position exacte du feu
+  const gl=w.grid_lats, gn=w.grid_lons;
+  const gy=Math.max(0,Math.min((la-gl[0])/(gl[gl.length-1]-gl[0])*(gl.length-1),gl.length-1.001));
+  const gx=Math.max(0,Math.min((lo-gn[0])/(gn[gn.length-1]-gn[0])*(gn.length-1),gn.length-1.001));
+  const i=Math.floor(gy), j=Math.floor(gx), ty=gy-i, tx=gx-j;
+  const bl=(M)=>M[k][i][j]*(1-ty)*(1-tx)+M[k][i+1][j]*ty*(1-tx)
+             +M[k][i][j+1]*(1-ty)*tx+M[k][i+1][j+1]*ty*tx;
+  // direction : interpolation vectorielle (pas de moyenne 350°/10° fausse)
+  const d2r=Math.PI/180;
+  let ue=0,vn=0;
+  [[i,j,(1-ty)*(1-tx)],[i+1,j,ty*(1-tx)],[i,j+1,(1-ty)*tx],[i+1,j+1,ty*tx]].forEach(([a,b,wgt])=>{
+    const d=w.dir[k][a][b]*d2r; ue+=Math.sin(d)*wgt; vn+=Math.cos(d)*wgt;});
+  return {s:bl(w.speed), dir:Math.atan2(ue,vn)/d2r,
+          t:w.temp?bl(w.temp):null};
+}
 function drawWindAt(ts){
   const w=state.wind; if(!w||!w.speed||!ts) return;
   const k=state.windIdx[ts.slice(0,13)]; if(k==null) return;
-  // fleches et temperatures UNIQUEMENT aux abords des incendies actifs
+  // une fleche PAR INCENDIE actif, interpolee a sa position : on lit d'un
+  // coup d'oeil si le feu a le vent pour se propager
   let fires=[];
   if(ZONE==='france'){
     fires=((state.data&&state.data.clusters)||[]).filter(c=>c.active).map(c=>[c.lat,c.lon]);
@@ -627,11 +676,23 @@ function drawWindAt(ts){
     const c=state.data&&state.data.fire_perimeter&&state.data.fire_perimeter.centroid;
     if(c) fires=[[c.lat,c.lon]];
   }
-  const R=ZONE==='france'?0.75:0.45;   // degres (~80 km / ~50 km)
-  const nearFire=(la,lo)=>fires.some(f=>Math.abs(f[0]-la)<R&&Math.abs(f[1]-lo)<R*1.4);
+  if(fires.length){
+    const off=ZONE==='france'?0.22:0.09;   // decalage pour ne pas couvrir le feu
+    fires.forEach(f=>{
+      const wp=windAtPoint(w,k,f[0],f[1]); if(!wp) return;
+      const s=wp.s, dir=wp.dir, t=wp.t!=null?Math.round(wp.t):null;
+      const rot=(dir+90);
+      const size=7+Math.min(s,22)*0.85;
+      const tf=t!=null?Math.max(7,Math.min(15,7+(t-15)*0.32)):0;
+      const ic=L.divIcon({className:'wind-arrow',iconSize:[size,size+12],
+        html:`<div style="transform:rotate(${rot}deg);color:rgba(255,255,255,.85);font-size:${size}px;line-height:${size}px;text-shadow:0 1px 2px #000">➤</div>`+
+             (t!=null?`<div style="font-size:${tf.toFixed(1)}px;color:#ddd;text-align:center;text-shadow:0 1px 2px #000;opacity:${t>=30?'0.95':'0.75'};margin-top:1px;${t>=32?'font-weight:700;color:#ffcf9e;':''}">${t}°</div>`:'')});
+      L.marker([f[0]+off,f[1]+off*0.6],{icon:ic,interactive:false,keyboard:false}).addTo(windLayer);
+    });
+    return;
+  }
   for(let a=0;a<w.grid_lats.length;a++){
     for(let b=0;b<w.grid_lons.length;b++){
-      if(fires.length&&!nearFire(w.grid_lats[a],w.grid_lons[b])) continue;
       const s=w.speed[k][a][b], dir=w.dir[k][a][b];
       const t=(w.temp&&w.temp[k])?Math.round(w.temp[k][a][b]):null;
       const rot=(dir+90); // arrow ➤ points east by default; wind blows toward dir+180
