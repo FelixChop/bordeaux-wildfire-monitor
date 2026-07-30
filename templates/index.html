@@ -336,8 +336,33 @@ map.on('dblclick',e=>{ if(ZONE!=='france') return;
 window.addEventListener('resize', ()=>{ clearTimeout(window._rz); window._rz=setTimeout(lockView,200); });
 
 // layers
-let firePts=L.layerGroup().addTo(map);   // past hotspots
-let simLayer=L.layerGroup().addTo(map);   // simulation polygons
+let firePts=L.layerGroup().addTo(map);   // past hotspots (marqueurs riches : Meteosat, orages…)
+let simLayer=L.layerGroup().addTo(map);   // simulation (marqueurs riches)
+// CANVAS unique pour les MILLIERS de points de feu : 13k+ marqueurs Leaflet
+// recrees a chaque frame gelaient iOS -> un seul trace canvas (~10 ms)
+const fireCanvas=document.createElement('canvas');
+fireCanvas.style.cssText='position:absolute;pointer-events:none';
+map.getPanes().overlayPane.appendChild(fireCanvas);
+const fcCtx=fireCanvas.getContext('2d');
+let fcOrigin={x:0,y:0};
+function fcReset(){
+  const sz=map.getSize();
+  fireCanvas.width=sz.x; fireCanvas.height=sz.y;
+  const tl=map.containerPointToLayerPoint([0,0]);
+  L.DomUtil.setPosition(fireCanvas,tl);
+  fcOrigin=tl;
+}
+fcReset();
+map.on('moveend zoomend viewreset resize',()=>{fcReset();
+  if(state&&state.idx!=null){try{render(state.idx);}catch(e){}}});
+function fcClear(){fcCtx.clearRect(0,0,fireCanvas.width,fireCanvas.height);}
+function fcDraw(lat,lon,r,col,op){
+  const p=map.latLngToLayerPoint([lat,lon]);
+  const x=p.x-fcOrigin.x,y=p.y-fcOrigin.y;
+  if(x<-24||y<-24||x>fireCanvas.width+24||y>fireCanvas.height+24) return;
+  fcCtx.globalAlpha=op;fcCtx.fillStyle=col;
+  fcCtx.beginPath();fcCtx.arc(x,y,r,0,6.2832);fcCtx.fill();
+}
 let windLayer=L.layerGroup().addTo(map);  // wind-field arrows
 
 let state={frames:[], nowIdx:0, idx:0, playing:false, timer:null,
@@ -647,7 +672,7 @@ function randomMember(){
 function onSlide(v){ if(state.playing) stop(); render(+v); }
 function render(i){
   i=Math.max(0,Math.min(i, +$('slider').max)); state.idx=i; $('slider').value=i;
-  firePts.clearLayers(); simLayer.clearLayers(); windLayer.clearLayers();
+  firePts.clearLayers(); simLayer.clearLayers(); windLayer.clearLayers(); fcClear();
   const f=state.frames[i]; if(!f){ $('tlTime').textContent='—'; return; }
   $('liveBtn').classList.toggle('on', i===state.nowIdx);
   document.body.classList.toggle('simmode', f.kind==='sim');
@@ -727,8 +752,7 @@ function ageStyle(age,frp){
 }
 const SCAR={col:'#141414',op:.55,r:3};   // végétation brûlée
 function drawPoint(p,st,layer,rpx){
-  L.circleMarker([p.lat,p.lon],{radius:rpx||Math.max(st.r*RS,1.6),color:st.col,weight:.5,
-    fillColor:st.col,fillOpacity:st.op}).addTo(layer);
+  fcDraw(p.lat,p.lon,rpx||Math.max(st.r*RS,1.6),st.col,st.op);
 }
 function renderPastFrame(f,i){
   const win=state.winH, h=f.hIdx;
