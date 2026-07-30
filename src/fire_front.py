@@ -772,6 +772,15 @@ def derive_view(store, view='ref', emit_every=3):
                     round(float(dom['lon_axis'][c]), 4), int(ig_m[r, c])]
                    for r, c in zip(nr.tolist(), nc.tolist())
                    if not dense or (r + c) % 2 == 0]
+        # re-detections : cellules brulees il y a 6-60 h qui couvent encore —
+        # echantillon stable (~1/4) pour mimer les re-passages satellites
+        smold = (ig_m > H - 60) & (ig_m <= H - 6) & ~seed
+        sr_, sc_ = np.where(smold)
+        for r, c in zip(sr_.tolist(), sc_.tolist()):
+            if (r * 7 + c * 13 + H) % 4 == 0:
+                new_pts.append([round(float(dom['lat_axis'][r]), 4),
+                                round(float(dom['lon_axis'][c]), 4),
+                                int(H - 8)])
         prev_h = H
         mm = meta[H] if meta and H < len(meta) else {}
         frames.append({
