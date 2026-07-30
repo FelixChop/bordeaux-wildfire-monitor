@@ -1519,10 +1519,25 @@ _SEO_FRANCE = {
 }
 
 
+def _site_for_host():
+    """Site dedie a un incendie (dijon.feux-de-foret.fr…) ? (warm, extensible
+    sans redeploiement)."""
+    host = (request.host or '').split(':')[0]
+    return host, (_warm_load('fire_sites.json') or {}).get(host)
+
+
 def _html(t):
-    is_fr = 'feux-de-foret' in (request.host or '')
-    resp = Response(render_template(t, seo=_SEO_FRANCE if is_fr else _SEO_GIRONDE),
-                    mimetype='text/html')
+    host, site = _site_for_host()
+    if site:
+        seo = {'title': site['title'], 'desc': site['desc'],
+               'url': f'https://{host}/', 'og_title': site['title'],
+               'og_desc': site['desc'], 'h1': site['h1'],
+               'zone': site['zone']}
+    else:
+        is_fr = 'feux-de-foret' in host
+        seo = dict(_SEO_FRANCE if is_fr else _SEO_GIRONDE)
+        seo['zone'] = ''
+    resp = Response(render_template(t, seo=seo), mimetype='text/html')
     resp.headers['Cache-Control'] = 'no-cache'
     return resp
 
@@ -2559,14 +2574,14 @@ def api_air_grid():
 
 @app.route('/robots.txt')
 def robots():
-    host = 'feux-de-foret.fr' if 'feux-de-foret' in (request.host or '') else 'incendiebordeaux.fr'
+    host = (request.host or 'incendiebordeaux.fr').split(':')[0]
     return Response(f"User-agent: *\nAllow: /\nSitemap: https://{host}/sitemap.xml\n",
                     mimetype='text/plain')
 
 
 @app.route('/sitemap.xml')
 def sitemap():
-    host = 'feux-de-foret.fr' if 'feux-de-foret' in (request.host or '') else 'incendiebordeaux.fr'
+    host = (request.host or 'incendiebordeaux.fr').split(':')[0]
     xml = ('<?xml version="1.0" encoding="UTF-8"?>'
            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
            f'<url><loc>https://{host}/</loc><changefreq>hourly</changefreq></url>'

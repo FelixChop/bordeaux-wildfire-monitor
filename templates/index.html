@@ -295,7 +295,8 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script>
 const HOST_FR=location.hostname.includes('feux-de-foret');
-const ZONE=(new URLSearchParams(location.search).get('zone'))||(HOST_FR?'france':'');
+const SITE_ZONE={{ seo.zone|default('')|tojson }},
+ZONE=(new URLSearchParams(location.search).get('zone'))||SITE_ZONE||(HOST_FR?'france':'');
 const RS=(ZONE==='france')?0.55:1;   // points plus petits à l'échelle nationale
 const zu=u=>ZONE?u+(u.includes('?')?'&':'?')+'zone='+encodeURIComponent(ZONE):u;
 const BDX=[44.837,-0.579];
