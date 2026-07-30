@@ -743,13 +743,12 @@ def _air_subset(bbox):
             'bbox': [zlat0, zlon0, zlat1, zlon1]}
 
 
-def fetch_air_field_bbox(bbox):
-    """Champ air horaire (EAQI+PM2.5) pour une bbox de zone."""
+def fetch_air_field_bbox(bbox, n_lat=6, n_lon=7, past_days=10):
+    """Champ air horaire pour une bbox : EAQI, PM2.5, PM10, CO, NO2, O3."""
     global _air_block_until
     if time.time() < _air_block_until:
         return None                      # quota API en cours de refroidissement
     lon0, lat0, lon1, lat1 = bbox
-    n_lat, n_lon = 6, 7                  # 42 localisations (quota Open-Meteo)
     lats = np.linspace(lat0, lat1, n_lat)
     lons = np.linspace(lon0, lon1, n_lon)
     laq, loq = [], []
