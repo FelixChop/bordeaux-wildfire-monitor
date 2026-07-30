@@ -203,6 +203,9 @@
 </head>
 <body>
   <div class="loading" id="loading"><div><div class="spin"></div>Chargement des données temps réel…</div></div>
+  <div id="dayChip" style="position:fixed;z-index:1000;top:calc(env(safe-area-inset-top) + 74px);left:10px;
+    background:rgba(0,0,0,.55);border:1px solid var(--line);border-radius:12px;
+    padding:4px 10px;font-size:12px;color:#f0e9e4;pointer-events:none">—</div>
 
   <h1 class="sr-only">{{ seo.h1 }}</h1>
   <div id="map"></div>
@@ -702,7 +705,29 @@ function windAtPoint(w,k,la,lo){
   return {s:bl(w.speed), dir:Math.atan2(ue,vn)/d2r,
           t:w.temp?bl(w.temp):null};
 }
+function wmoIcon(code,hourLoc){
+  const day=hourLoc>=7&&hourLoc<21;
+  if(code>=95) return '⛈️';
+  if(code>=80) return '🌧️';
+  if(code>=71&&code<80) return '🌨️';
+  if(code>=51) return '🌧️';
+  if(code>=45&&code<51) return '🌫️';
+  if(code===3) return '☁️';
+  if(code===2) return day?'⛅️':'☁️';
+  if(code===1) return day?'🌤️':'🌙';
+  return day?'☀️':'🌙';
+}
+function updateDayChip(ts){
+  const el=$('dayChip'); if(!el||!ts) return;
+  const d=new Date(ts.replace(' ','T'));
+  if(isNaN(d)) return;
+  const hl=(d.getUTCHours()+2)%24;   // heure locale France (été)
+  const icon=(hl>=7&&hl<21)?'🌞':'🌙';
+  el.textContent=icon+' '+d.toLocaleDateString('fr-FR',{weekday:'short',day:'numeric',month:'short'})
+    +' · '+String(hl).padStart(2,'0')+'h';
+}
 function drawWindAt(ts){
+  updateDayChip(ts);
   const w=state.wind; if(!w||!w.speed||!ts) return;
   const k=state.windIdx[ts.slice(0,13)]; if(k==null) return;
   // une fleche PAR INCENDIE actif, interpolee a sa position : on lit d'un
@@ -731,9 +756,22 @@ function drawWindAt(ts){
       const rot=(dir+90);
       const size=7+Math.min(s,22)*0.85;
       const tf=t!=null?Math.max(7,Math.min(15,7+(t-15)*0.32)):0;
-      const ic=L.divIcon({className:'wind-arrow',iconSize:[size,size+12],
+      let wx='';
+      if(f[2]&&f[2].wmo){
+        const q2=f[2]._idx&&f[2]._idx[tsKey];
+        if(q2!=null){
+          const d0=new Date(ts.replace(' ','T'));
+          const hl=isNaN(d0)?12:(d0.getUTCHours()+2)%24;
+          const rn=(f[2].rain&&f[2].rain[q2])||0;
+          const em=wmoIcon(f[2].wmo[q2],hl);
+          // tres discret : petite icone semi-transparente sous la fleche,
+          // renforcee seulement s'il pleut vraiment (rassurant)
+          wx=`<div style="font-size:${rn>0.2?13:10}px;text-align:center;opacity:${rn>0.2?0.95:0.55};margin-top:1px">${em}</div>`;
+        }
+      }
+      const ic=L.divIcon({className:'wind-arrow',iconSize:[size,size+24],
         html:`<div style="transform:rotate(${rot}deg);color:rgba(255,255,255,.85);font-size:${size}px;line-height:${size}px;text-shadow:0 1px 2px #000">➤</div>`+
-             (t!=null?`<div style="font-size:${tf.toFixed(1)}px;color:#ddd;text-align:center;text-shadow:0 1px 2px #000;opacity:${t>=30?'0.95':'0.75'};margin-top:1px;${t>=32?'font-weight:700;color:#ffcf9e;':''}">${t}°</div>`:'')});
+             (t!=null?`<div style="font-size:${tf.toFixed(1)}px;color:#ddd;text-align:center;text-shadow:0 1px 2px #000;opacity:${t>=30?'0.95':'0.75'};margin-top:1px;${t>=32?'font-weight:700;color:#ffcf9e;':''}">${t}°</div>`:'')+wx});
       L.marker([f[0]+off,f[1]+off*0.6],{icon:ic,interactive:false,keyboard:false}).addTo(windLayer);
     });
     return;

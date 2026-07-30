@@ -272,7 +272,8 @@ def fetch_wind_field(n=6, hours=432):  # 10 j passes + 8 j de prevision
             'latitude': ','.join(map(str, lats_q)),
             'longitude': ','.join(map(str, lons_q)),
             'hourly': 'wind_speed_10m,wind_direction_10m,relative_humidity_2m,'
-                      'temperature_2m,soil_moisture_0_to_7cm',
+                      'temperature_2m,soil_moisture_0_to_7cm,'
+                      'weather_code,precipitation',
             'past_days': 10, 'forecast_days': 8, 'timezone': 'UTC',
         }, timeout=20)
         if r.status_code != 200:
@@ -287,21 +288,30 @@ def fetch_wind_field(n=6, hours=432):  # 10 j passes + 8 j de prevision
         rh = np.zeros((len(times), n, n))
         temp = np.zeros((len(times), n, n))
         soil = np.zeros((len(times), n, n))
+        wmo = np.zeros((len(times), n, n))
+        rain = np.zeros((len(times), n, n))
         for idx, res in enumerate(results):
             i, j = idx // n, idx % n
             h = res.get('hourly', {})
+
+            def _g(key, t, d):
+                arr = h.get(key) or []
+                v = arr[t] if t < len(arr) else None
+                return d if v is None else v
             for t in range(len(times)):
-                speed[t, i, j] = (h.get('wind_speed_10m') or [0])[t] or 0
-                wdir[t, i, j] = (h.get('wind_direction_10m') or [270])[t] or 270
-                rh[t, i, j] = (h.get('relative_humidity_2m') or [50])[t] or 50
-                temp[t, i, j] = (h.get('temperature_2m') or [25])[t] or 25
-                sv = (h.get('soil_moisture_0_to_7cm') or [0.2])[t]
-                soil[t, i, j] = 0.2 if sv is None else sv
+                speed[t, i, j] = _g('wind_speed_10m', t, 0)
+                wdir[t, i, j] = _g('wind_direction_10m', t, 270)
+                rh[t, i, j] = _g('relative_humidity_2m', t, 50)
+                temp[t, i, j] = _g('temperature_2m', t, 25)
+                soil[t, i, j] = _g('soil_moisture_0_to_7cm', t, 0.2)
+                wmo[t, i, j] = _g('weather_code', t, 0)
+                rain[t, i, j] = _g('precipitation', t, 0)
         return {
             'grid_lats': [round(float(x), 4) for x in grid_lats],
             'grid_lons': [round(float(x), 4) for x in grid_lons],
             'times': times,
             'speed': speed, 'dir': wdir, 'rh': rh, 'temp': temp, 'soil': soil,
+            'wmo': wmo, 'rain': rain,
         }
     except Exception as e:
         print(f"Wind field fetch error: {e}")
@@ -580,6 +590,10 @@ def _met_series(wf, lat, lon):
             return (M[:, i, j] * (1-ty) * (1-tx) + M[:, i+1, j] * ty * (1-tx)
                     + M[:, i, j+1] * (1-ty) * tx + M[:, i+1, j+1] * ty * tx)
         sp = bl(wf['speed']); tp = bl(wf['temp'])
+        W = np.asarray(wf['wmo']) if wf.get('wmo') is not None else None
+        R = np.asarray(wf['rain']) if wf.get('rain') is not None else None
+        i_n = i + (1 if ty > 0.5 else 0)
+        j_n = j + (1 if tx > 0.5 else 0)
         d2r = np.pi / 180.0
         D = np.asarray(wf['dir']) * d2r
         ue = (np.sin(D[:, i, j]) * (1-ty) * (1-tx)
@@ -591,10 +605,15 @@ def _met_series(wf, lat, lon):
               + np.cos(D[:, i, j+1]) * (1-ty) * tx
               + np.cos(D[:, i+1, j+1]) * ty * tx)
         dr = (np.degrees(np.arctan2(ue, vn)) + 360) % 360
-        return {'times': wf['times'],
-                'speed': np.round(sp, 1).tolist(),
-                'dir': np.round(dr, 0).tolist(),
-                'temp': np.round(tp, 1).tolist()}
+        out = {'times': wf['times'],
+               'speed': np.round(sp, 1).tolist(),
+               'dir': np.round(dr, 0).tolist(),
+               'temp': np.round(tp, 1).tolist()}
+        if W is not None:
+            out['wmo'] = W[:, i_n, j_n].astype(int).tolist()
+        if R is not None:
+            out['rain'] = np.round(bl(R), 1).tolist()
+        return out
     except Exception:
         return None
 
@@ -711,7 +730,7 @@ _air_block_until = 0.0
 # conserve sur disque ; chaque cycle ne rafraichit que l'heure nouvelle et
 # la prevision. L'historique reste ancre a FIRE_T0 meme quand la fenetre
 # des APIs (10 j) aura glisse au-dela.
-_WX_KEYS = ('speed', 'dir', 'rh', 'temp', 'soil')
+_WX_KEYS = ('speed', 'dir', 'rh', 'temp', 'soil', 'wmo', 'rain')
 _AIR_KEYS = ('aqi', 'pm25', 'pm10', 'co', 'no2', 'o3')
 
 
@@ -903,7 +922,8 @@ def fetch_wind_field_bbox(bbox, n=6, past_days=10):
             'latitude': ','.join(map(str, laq)),
             'longitude': ','.join(map(str, loq)),
             'hourly': 'wind_speed_10m,wind_direction_10m,relative_humidity_2m,'
-                      'temperature_2m,soil_moisture_0_to_7cm',
+                      'temperature_2m,soil_moisture_0_to_7cm,'
+                      'weather_code,precipitation',
             'past_days': past_days, 'forecast_days': 8,
             'timezone': 'UTC'}, timeout=40)
         if r.status_code != 200:
@@ -913,11 +933,13 @@ def fetch_wind_field_bbox(bbox, n=6, past_days=10):
             results = [results]
         times = results[0]['hourly']['time'][:(past_days + 8) * 24]
         arrs = {k: np.zeros((len(times), n, n)) for k in
-                ('speed', 'dir', 'rh', 'temp', 'soil')}
+                ('speed', 'dir', 'rh', 'temp', 'soil', 'wmo', 'rain')}
         keys = {'speed': 'wind_speed_10m', 'dir': 'wind_direction_10m',
                 'rh': 'relative_humidity_2m', 'temp': 'temperature_2m',
-                'soil': 'soil_moisture_0_to_7cm'}
-        defaults = {'speed': 0, 'dir': 270, 'rh': 50, 'temp': 25, 'soil': 0.2}
+                'soil': 'soil_moisture_0_to_7cm', 'wmo': 'weather_code',
+                'rain': 'precipitation'}
+        defaults = {'speed': 0, 'dir': 270, 'rh': 50, 'temp': 25, 'soil': 0.2,
+                    'wmo': 0, 'rain': 0}
         for idx, res in enumerate(results):
             i, j = idx // n, idx % n
             hh = res.get('hourly', {})
@@ -1037,7 +1059,8 @@ def _refresh_france_zone(fr):
         # STORE meteo incremental : passe telecharge une fois (ancre FIRE_T0),
         # puis seulement les heures recentes + la prevision a chaque cycle
         wx_prev = z.get('wind_field') or _warm_load('france_wx.json')
-        first_wx = not (wx_prev and wx_prev.get('g') == '10x10')
+        first_wx = not (wx_prev and wx_prev.get('g') == '10x10'
+                        and wx_prev.get('wmo') is not None)
         wf_new = fetch_wind_field_bbox(FR_SIM_BBOX, n=10,
                                        past_days=10 if first_wx else 2)
         z['wind_field'] = _merge_series(wx_prev, wf_new, _WX_KEYS) \
