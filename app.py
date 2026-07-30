@@ -563,13 +563,22 @@ def zone_page():
     return _html('index.html')
 
 
+def _attach_scores(clusters):
+    for c in clusters:
+        sc_z = (ZONES.get(c.get('zone')) or {}).get('sim_score')
+        if sc_z:
+            c['sim_score'] = sc_z
+    return clusters
+
+
 @app.route('/api/fires')
 def api_fires():
     """Incendies actifs détectés sur toute la France (clusters)."""
     data = _cached('france_fires', 3600, fetch_france_fires)
     if data is None:
         return jsonify({'clusters': []}), 503
-    return jsonify({'ts': data['ts'], 'clusters': data['clusters']})
+    return jsonify({'ts': data['ts'],
+                    'clusters': _attach_scores(list(data['clusters']))})
 
 
 # ---------------------------------------------------------------------------
@@ -2697,7 +2706,12 @@ def _score_zone(z):
         r = _window_loss(hs, wf, z['veg'], z['sim_bbox'],
                          max(now_idx - 24, 1), 24, params, n_runs=1)
         if r:
-            score = int(np.clip(100 * np.exp(-r['loss']), 3, 97))
+            # score lisible : 100 si surface juste ET bien placee ;
+            # ~50 si surface x2 ; ~25 si surface x5
+            ratio_pen = np.exp(-0.7 * abs(np.log(max(r['a_sim'], 1)
+                                                 / max(r['a_obs'], 1))))
+            score = int(np.clip(100 * ratio_pen * (0.45 + 0.55 * r['recall']),
+                                3, 97))
             z['sim_score'] = {'score': score, 'a_sim': r['a_sim'],
                               'a_obs': r['a_obs'], 'recall': r['recall'],
                               'date': now_key}
