@@ -268,6 +268,9 @@ def fetch_wind_field(n=6, hours=432):  # 10 j passes + 8 j de prevision
             lats_q.append(round(float(la), 4))
             lons_q.append(round(float(lo), 4))
     try:
+        global _wx_block_until
+        if time.time() < _wx_block_until:
+            return None
         r = requests.get("https://api.open-meteo.com/v1/forecast", params={
             'latitude': ','.join(map(str, lats_q)),
             'longitude': ','.join(map(str, lons_q)),
@@ -276,6 +279,10 @@ def fetch_wind_field(n=6, hours=432):  # 10 j passes + 8 j de prevision
                       'weather_code,precipitation',
             'past_days': 10, 'forecast_days': 8, 'timezone': 'UTC',
         }, timeout=20)
+        if r.status_code == 429:
+            _wx_block_until = time.time() + 1800
+            print("vent 429 -> pause 30 min")
+            return None
         if r.status_code != 200:
             return None
         results = r.json()
@@ -773,7 +780,7 @@ def fetch_air_sensors_fallback():
                          'box=41.2,-5.2,51.3,9.8', timeout=60)
         if r.status_code != 200:
             return None
-        n_lat, n_lon = 6, 7
+        n_lat, n_lon = 10, 14
         lon0, lat0, lon1, lat1 = FR_SIM_BBOX
         s = np.zeros((n_lat, n_lon))
         c = np.zeros((n_lat, n_lon))
@@ -814,6 +821,50 @@ def fetch_air_sensors_fallback():
                 'source': 'sensor.community (mesures capteurs)'}
     except Exception as e:
         print(f"sensors fallback err: {e}")
+        return None
+
+
+_wx_block_until = 0.0
+
+
+def _wx_subset(bbox, n=6):
+    """Champ vent d'une zone DECOUPE du store national (0 appel API)."""
+    fr = (ZONES.get('france') or {}).get('wind_field')
+    if not fr or fr.get('speed') is None:
+        return None
+    try:
+        gl = np.asarray(fr['grid_lats']); gn = np.asarray(fr['grid_lons'])
+        lon0, lat0, lon1, lat1 = bbox
+        zl = np.linspace(lat0, lat1, n); zn = np.linspace(lon0, lon1, n)
+        gy = np.clip((zl - gl[0]) / (gl[-1] - gl[0]) * (len(gl) - 1), 0, len(gl) - 1.001)
+        gx = np.clip((zn - gn[0]) / (gn[-1] - gn[0]) * (len(gn) - 1), 0, len(gn) - 1.001)
+        i0 = gy.astype(int); j0 = gx.astype(int)
+        wy = (gy - i0)[None, :, None]; wx = (gx - j0)[None, None, :]
+        i1 = np.minimum(i0 + 1, len(gl) - 1); j1 = np.minimum(j0 + 1, len(gn) - 1)
+
+        def sub(M, vector_deg=False):
+            M = np.asarray(M, dtype=float)
+            if vector_deg:
+                d = np.radians(M)
+                ue = sub(np.sin(d)); vn = sub(np.cos(d))
+                return ((np.degrees(np.arctan2(ue, vn)) + 360) % 360)
+            return (M[:, i0][:, :, j0] * (1 - wy) * (1 - wx)
+                    + M[:, i1][:, :, j0] * wy * (1 - wx)
+                    + M[:, i0][:, :, j1] * (1 - wy) * wx
+                    + M[:, i1][:, :, j1] * wy * wx)
+        out = {'grid_lats': [round(float(x), 4) for x in zl],
+               'grid_lons': [round(float(x), 4) for x in zn],
+               'times': fr['times'], 'g': f'sub{n}'}
+        for k in _WX_KEYS:
+            if fr.get(k) is None:
+                out[k] = None
+            elif k == 'dir':
+                out[k] = np.round(sub(fr[k], vector_deg=True), 0).tolist()
+            else:
+                out[k] = np.round(sub(fr[k]), 2).tolist()
+        return out
+    except Exception as e:
+        print(f"wx subset err: {e}")
         return None
 
 
@@ -918,6 +969,9 @@ def fetch_wind_field_bbox(bbox, n=6, past_days=10):
             laq.append(round(float(la), 4))
             loq.append(round(float(lo), 4))
     try:
+        global _wx_block_until
+        if time.time() < _wx_block_until:
+            return None
         r = requests.get("https://api.open-meteo.com/v1/forecast", params={
             'latitude': ','.join(map(str, laq)),
             'longitude': ','.join(map(str, loq)),
@@ -926,6 +980,10 @@ def fetch_wind_field_bbox(bbox, n=6, past_days=10):
                       'weather_code,precipitation',
             'past_days': past_days, 'forecast_days': 8,
             'timezone': 'UTC'}, timeout=40)
+        if r.status_code == 429:
+            _wx_block_until = time.time() + 1800
+            print("vent bbox 429 -> pause 30 min")
+            return None
         if r.status_code != 200:
             return None
         results = r.json()
@@ -968,7 +1026,8 @@ def _zone_refresh(z):
         last_ts = max((h['timestamp'] for h in hotspots), default=None)
         sats = sorted({h.get('sat') for h in hotspots})
         clat, clon = z['lat'], z['lon']
-        z['wind_field'] = fetch_wind_field_bbox(bbox) or z.get('wind_field')
+        z['wind_field'] = (_wx_subset(bbox) or fetch_wind_field_bbox(bbox)
+                           or z.get('wind_field'))
         wind_series = []
         wf = z['wind_field']
         if wf:
@@ -1356,7 +1415,12 @@ def update_data():
 
             firms = fetch_nasa_firms()
             wind = fetch_extended_wind_forecast()
-            _wind_field = fetch_wind_field()
+            _wind_field = (fetch_wind_field()
+                           or _wx_subset((-1.75, 44.20, -0.25, 45.55))
+                           or _wind_field or _warm_load('gironde_wx.json'))
+            if _wind_field is not None and isinstance(
+                    _wind_field.get('speed'), list):
+                _warm_save('gironde_wx.json', _wind_field)
             fetch_vegetation()  # populates _veg_cache
 
             # Compute fire perimeter
